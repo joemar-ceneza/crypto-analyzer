@@ -28,10 +28,11 @@ Works for any symbol on the exchange — ETH/USDT is just the default.
 
 ## Setup
 1. Clone or download this project
-2. Create the virtual environment:
+2. Activate a Python 3.11+ virtual environment (any location works — a
+   shared one outside the project folder is fine):
    ```
-   python -m venv venv
-   venv\Scripts\activate
+   python -m venv .venv
+   .venv\Scripts\activate
    ```
 3. Install dependencies:
    ```
@@ -53,30 +54,34 @@ Works for any symbol on the exchange — ETH/USDT is just the default.
 
 ## How to Run
 
+Run everything from the project folder with your venv active (or prefix
+commands with the full path to your venv's `python.exe`).
+
 **Interactive dashboard:**
 ```
-venv\Scripts\python.exe -m streamlit run dashboard/app.py
+python -m streamlit run dashboard/app.py
 ```
-Tabs: **Chart** (candles + indicators), **Confluence** (1h/4h/1d alignment),
+Views: **Chart** (candles + indicators), **Confluence** (1h/4h/1d alignment),
 **Market Report** (downloadable markdown), **Strategy Lab** (tunable
 backtest + parameter sweep).
 
 **CLI report generation:**
 ```
-venv\Scripts\python.exe main.py                          # ETH/USDT 1h
-venv\Scripts\python.exe main.py --symbol BTC/USDT --timeframe 4h
-venv\Scripts\python.exe main.py --backtest               # + strategy backtest
+python main.py                          # ETH/USDT 1h
+python main.py --symbol BTC/USDT --timeframe 4h
+python main.py --backtest               # + strategy backtest
 ```
 Reports are saved to `output/reports/`.
 
 **Scheduled data collection (Task Scheduler):**
 ```
-venv\Scripts\python.exe main.py --collect
+python main.py --collect
 ```
 Incrementally tops up the SQLite store for every symbol/timeframe in
 `config.COLLECT_SYMBOLS` / `COLLECT_TIMEFRAMES`. Point a Windows Task
-Scheduler job at the full venv python path with the `--collect` argument
-(e.g. hourly) and the candle history grows on its own.
+Scheduler job at your venv's full `python.exe` path with `main.py --collect`
+as arguments and this folder as the working directory (e.g. hourly), and
+the candle history grows on its own.
 
 ## Default Strategy Rules (backtest & chart markers)
 - **BUY:** price below trailing VAL **and** RSI < 35 **and** MACD bullish crossover
@@ -87,8 +92,8 @@ Scheduler job at the full venv python path with the `--collect` argument
 
 ## Tests
 ```
-venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-venv\Scripts\python.exe -m pytest -q
+pip install -r requirements-dev.txt
+python -m pytest -q
 ```
 GitHub Actions runs the same suite on every push (`.github/workflows/ci.yml`).
 
