@@ -2,8 +2,9 @@
 Streamlit trading intelligence dashboard.
 
 TradingView-style interface: candlestick chart with EMAs, volume profile,
-support/resistance, fibonacci, buy/sell markers — plus the automated
-market report and the strategy backtester.
+support/resistance, fibonacci, buy/sell markers, RSI and MACD subpanels —
+plus multi-timeframe confluence, the automated market report, and a
+strategy lab with tunable rules and parameter sweep.
 
 Run from the project root:
     venv\\Scripts\\python.exe -m streamlit run dashboard/app.py
@@ -25,7 +26,7 @@ from plotly.subplots import make_subplots
 import config
 import utils
 from ai import analyzer
-from analysis import report_generator
+from analysis import confluence, report_generator
 from backtesting import strategy
 from data import database, exchange
 
@@ -53,6 +54,9 @@ _COLORS = {
     "sell": "#d03b3b",
     "volume_profile": "#256abf",
     "equity": "#3987e5",
+    "rsi": "#9085e9",
+    "macd": "#3987e5",
+    "macd_signal": "#c98500",
 }
 
 
@@ -79,6 +83,16 @@ def _load_ticker(symbol: str) -> dict:
     except Exception as error:  # ticker is decorative — never block the app
         logging.warning("Ticker fetch failed: %s", error)
         return {}
+
+
+@st.cache_data(ttl=300, show_spinner="Analyzing timeframes…")
+def _load_confluence(symbol: str) -> dict | None:
+    """Runs multi-timeframe confluence (cached; None on failure)."""
+    try:
+        return confluence.run_confluence(symbol)
+    except Exception as error:
+        logging.warning("Confluence failed for %s: %s", symbol, error)
+        return None
 
 
 @st.cache_data(ttl=3600, show_spinner="Loading symbol list…")
@@ -153,23 +167,72 @@ def _add_emas(figure: go.Figure, trend_series: pd.DataFrame) -> None:
 def _add_volume_profile(figure: go.Figure, profile: dict, candles: pd.DataFrame) -> None:
     """Draws the horizontal volume-by-price histogram on a secondary x-axis."""
     histogram = profile["histogram"]
-    # NOTE: added without row/col — row placement would override the xaxis3
-    # assignment and put numeric volumes on the datetime axis.
+    # NOTE: added without row/col — row placement would override the axis
+    # assignment and put numeric volumes on the datetime axis. "x5" is the
+    # first free axis id after the four subplot rows.
     figure.add_trace(
         go.Bar(
             x=histogram["volume"], y=histogram["price"],
             orientation="h", name="Volume Profile",
             marker_color=_COLORS["volume_profile"], marker_opacity=0.28,
             showlegend=False, hoverinfo="skip",
-            xaxis="x3", yaxis="y",
+            xaxis="x5", yaxis="y",
         )
     )
     # Secondary x-axis: profile occupies the left ~18% of the price panel
     figure.update_layout(
-        xaxis3=dict(
+        xaxis5=dict(
             overlaying="x", side="top", showgrid=False, showticklabels=False,
             range=[0, float(histogram["volume"].max()) * 5.5],
         )
+    )
+
+
+def _add_momentum_panels(figure: go.Figure, momentum_series: pd.DataFrame) -> None:
+    """Adds the RSI (row 3) and MACD (row 4) subpanels."""
+    # RSI panel with overbought/oversold guides
+    figure.add_trace(
+        go.Scatter(
+            x=momentum_series.index, y=momentum_series["rsi"],
+            name="RSI", line=dict(color=_COLORS["rsi"], width=2),
+            showlegend=False,
+        ),
+        row=3, col=1,
+    )
+    for guide in (config.RSI_OVERBOUGHT, config.RSI_OVERSOLD):
+        figure.add_hline(
+            y=guide, line_color=_COLORS["muted"], line_dash="dot", line_width=1,
+            row=3, col=1,
+        )
+
+    # MACD panel: histogram colored by sign + MACD/signal lines
+    histogram_colors = [
+        _COLORS["candle_up"] if value >= 0 else _COLORS["candle_down"]
+        for value in momentum_series["macd_hist"]
+    ]
+    figure.add_trace(
+        go.Bar(
+            x=momentum_series.index, y=momentum_series["macd_hist"],
+            name="MACD hist", marker_color=histogram_colors, marker_opacity=0.5,
+            showlegend=False,
+        ),
+        row=4, col=1,
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=momentum_series.index, y=momentum_series["macd"],
+            name="MACD", line=dict(color=_COLORS["macd"], width=2),
+            showlegend=False,
+        ),
+        row=4, col=1,
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=momentum_series.index, y=momentum_series["macd_signal"],
+            name="Signal", line=dict(color=_COLORS["macd_signal"], width=2),
+            showlegend=False,
+        ),
+        row=4, col=1,
     )
 
 
@@ -226,7 +289,7 @@ def _style_chart(figure: go.Figure, symbol: str, timeframe: str) -> None:
     """Applies the dark TradingView-style theme to the figure."""
     figure.update_layout(
         title=f"{symbol} · {timeframe}",
-        height=720,
+        height=900,
         paper_bgcolor=_COLORS["surface"],
         plot_bgcolor=_COLORS["surface"],
         font=dict(color=_COLORS["text"], family="system-ui, 'Segoe UI', sans-serif"),
@@ -238,19 +301,23 @@ def _style_chart(figure: go.Figure, symbol: str, timeframe: str) -> None:
     )
     figure.update_xaxes(gridcolor=_COLORS["grid"], zeroline=False)
     figure.update_yaxes(gridcolor=_COLORS["grid"], zeroline=False)
+    # Panel captions on the y-axes
+    figure.update_yaxes(title_text="RSI", title_font_size=11, row=3, col=1)
+    figure.update_yaxes(title_text="MACD", title_font_size=11, row=4, col=1)
 
 
 def _build_chart(analysis: dict, signals: pd.DataFrame | None, show_fib: bool) -> go.Figure:
-    """Assembles the full price+volume chart from an analysis dict."""
+    """Assembles the full price/volume/RSI/MACD chart from an analysis dict."""
     candles = analysis["candles"].tail(config.CHART_CANDLES)
     figure = make_subplots(
-        rows=2, cols=1, shared_xaxes=True,
-        row_heights=[0.78, 0.22], vertical_spacing=0.03,
+        rows=4, cols=1, shared_xaxes=True,
+        row_heights=[0.55, 0.13, 0.16, 0.16], vertical_spacing=0.02,
     )
     _add_candles_and_volume(figure, candles)
     _add_emas(figure, analysis["trend"]["series"].tail(config.CHART_CANDLES))
     _add_volume_profile(figure, analysis["volume_profile"], candles)
     _add_levels(figure, analysis, show_fib)
+    _add_momentum_panels(figure, analysis["momentum"]["series"].tail(config.CHART_CANDLES))
     if signals is not None:
         _add_signal_markers(figure, candles, signals)
     _style_chart(figure, analysis["symbol"], analysis["timeframe"])
@@ -331,7 +398,10 @@ def _render_header(symbol: str, analysis: dict) -> None:
 def _render_report_tab(analysis: dict) -> None:
     """Generates and displays the automated market report."""
     narrative = analyzer.run_narrative(analysis)
-    report_markdown = report_generator.generate_report(analysis, narrative)
+    confluence_result = _load_confluence(analysis["symbol"])
+    report_markdown = report_generator.generate_report(
+        analysis, narrative, confluence_result
+    )
     st.download_button(
         "⬇️ Download report (.md)", report_markdown,
         file_name=f"{analysis['symbol'].replace('/', '-')}_report.md",
@@ -339,23 +409,52 @@ def _render_report_tab(analysis: dict) -> None:
     st.markdown(report_markdown)
 
 
-def _render_backtest_tab(candles: pd.DataFrame) -> None:
-    """Runs the strategy backtest on demand and shows the results."""
-    st.markdown(
-        "**Rules** — BUY: RSI < "
-        f"{config.BACKTEST_RSI_BUY}"
-        " + MACD bullish crossover"
-        + (" + price below trailing VAL" if config.BACKTEST_USE_VAL_FILTER else "")
-        + f" · SELL: RSI > {config.BACKTEST_RSI_SELL}"
-        + (" or price reaches trailing VAH" if config.BACKTEST_USE_VAH_TARGET else "")
+def _render_confluence_tab(symbol: str) -> None:
+    """Shows the multi-timeframe confluence table and verdict."""
+    st.caption(
+        "The same analysis run on several timeframes at once. Alignment "
+        "across timeframes is stronger evidence than any single reading."
     )
-    if not st.button("▶ Run backtest", type="primary"):
-        st.info("Runs the rule set over the loaded history. First run compiles Numba — allow ~1 min.")
+    result = _load_confluence(symbol)
+    if result is None:
+        st.error("Confluence analysis unavailable — see logs/automation.log.")
         return
 
-    with st.spinner("Backtesting…"):
-        result = strategy.run_backtest(candles)
+    st.subheader(result["verdict"])
+    st.metric("Alignment score", f"{result['total_score']:+d}",
+              f"{len(result['rows'])} timeframes", delta_color="off")
 
+    table = pd.DataFrame(result["rows"]).rename(
+        columns={
+            "timeframe": "Timeframe", "trend": "Trend", "structure": "Structure",
+            "rsi": "RSI", "macd_state": "MACD", "price_vs_poc": "vs POC",
+            "divergence": "Divergence", "score": "Score",
+        }
+    )
+    st.dataframe(
+        table.style.format({"RSI": "{:.0f}"}), width="stretch", hide_index=True
+    )
+
+
+def _collect_rule_inputs() -> dict:
+    """Renders the strategy-lab rule controls; returns the rule dict."""
+    columns = st.columns(4)
+    rsi_buy = columns[0].slider("BUY when RSI below", 10, 50,
+                                config.BACKTEST_RSI_BUY, step=5)
+    rsi_sell = columns[1].slider("SELL when RSI above", 50, 90,
+                                 config.BACKTEST_RSI_SELL, step=5)
+    use_val = columns[2].toggle("BUY only below trailing VAL",
+                                value=config.BACKTEST_USE_VAL_FILTER)
+    use_vah = columns[3].toggle("SELL at trailing VAH",
+                                value=config.BACKTEST_USE_VAH_TARGET)
+    return {
+        "rsi_buy": rsi_buy, "rsi_sell": rsi_sell,
+        "use_val_filter": use_val, "use_vah_target": use_vah,
+    }
+
+
+def _render_backtest_results(result: dict) -> None:
+    """Renders the stats row, equity curve, and trade list for one backtest."""
     stats = result["stats"]
     columns = st.columns(6)
     columns[0].metric("Trades", stats["total_trades"])
@@ -370,6 +469,51 @@ def _render_backtest_tab(candles: pd.DataFrame) -> None:
     if not result["trades"].empty:
         with st.expander(f"Trade list ({len(result['trades'])})"):
             st.dataframe(result["trades"], width="stretch")
+
+
+def _render_backtest_tab(candles: pd.DataFrame) -> None:
+    """Strategy lab: tunable rules, single backtest, and parameter sweep."""
+    st.markdown("#### Strategy lab")
+    rules = _collect_rule_inputs()
+    st.caption(
+        f"BUY: RSI < {rules['rsi_buy']} + MACD bullish crossover"
+        + (" + price below trailing VAL" if rules["use_val_filter"] else "")
+        + f" · SELL: RSI > {rules['rsi_sell']}"
+        + (" or price reaches trailing VAH" if rules["use_vah_target"] else "")
+        + " · First run compiles Numba — allow ~1 min."
+    )
+
+    button_columns = st.columns([1, 1, 3])
+    run_single = button_columns[0].button("▶ Run backtest", type="primary")
+    run_sweep = button_columns[1].button("🧮 Parameter sweep")
+
+    if run_single:
+        with st.spinner("Backtesting…"):
+            _render_backtest_results(strategy.run_backtest(candles, rules))
+    elif run_sweep:
+        with st.spinner(
+            f"Sweeping {len(config.SWEEP_RSI_BUY) * len(config.SWEEP_RSI_SELL)} "
+            "rule combinations…"
+        ):
+            sweep = strategy.run_parameter_sweep(candles, base_rules=rules)
+        st.markdown("**Combinations ranked by total return** — same data, "
+                    "same VAL/VAH filters, only the RSI thresholds vary.")
+        st.dataframe(
+            sweep.style.format(
+                {
+                    "win_rate_pct": "{:.1f}%", "total_return_pct": "{:+.2f}%",
+                    "final_value": "${:,.0f}", "max_drawdown_pct": "{:.2f}%",
+                    "sharpe_ratio": "{:.2f}",
+                }
+            ),
+            width="stretch", hide_index=True,
+        )
+        st.caption(
+            "A grid this small overfits easily — treat the best cell as a "
+            "hypothesis to re-test on other symbols and periods, not a result."
+        )
+    else:
+        st.info("Adjust the rules, then run a single backtest or sweep the RSI grid.")
 
 
 # ======================================================
@@ -393,22 +537,26 @@ def main() -> None:
     analysis = report_generator.run_analysis(symbol, timeframe, candles)
     _render_header(symbol, analysis)
 
-    chart_tab, report_tab, backtest_tab = st.tabs(
-        ["📊 Chart", "📋 Market Report", "🧪 Backtest"]
+    # segmented_control instead of st.tabs: tabs reset to the first tab on
+    # every rerun, so Strategy Lab results would render into a hidden panel.
+    views = ["📊 Chart", "🔭 Confluence", "📋 Market Report", "🧪 Strategy Lab"]
+    active_view = st.segmented_control(
+        "View", views, default=views[0], key="active_view",
+        label_visibility="collapsed",
     )
 
-    with chart_tab:
+    if active_view == "📊 Chart":
         signals = strategy.generate_signals(candles) if show_markers else None
         st.plotly_chart(
             _build_chart(analysis, signals, show_fib),
             width="stretch",
             config={"displayModeBar": True, "scrollZoom": True},
         )
-
-    with report_tab:
+    elif active_view == "🔭 Confluence":
+        _render_confluence_tab(symbol)
+    elif active_view == "📋 Market Report":
         _render_report_tab(analysis)
-
-    with backtest_tab:
+    elif active_view == "🧪 Strategy Lab":
         _render_backtest_tab(candles)
 
 

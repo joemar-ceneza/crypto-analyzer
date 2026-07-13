@@ -69,10 +69,27 @@ def _describe_momentum(analysis: dict) -> str:
     else:
         agreement = "Momentum indicators are mixed, which lowers conviction"
 
-    return (
+    sentence = (
         f"{agreement}: RSI reads {rsi:.0f} ({rsi_state}) while MACD shows "
         f"{macd_state.lower()}."
     )
+
+    divergence = momentum_result["divergence"]
+    if divergence["type"] == "bullish":
+        sentence += (
+            " Worth noting: a bullish RSI divergence has formed "
+            f"({divergence['detail']}) — sellers are pressing price lower with "
+            "less momentum, which often precedes a bounce but is not a buy "
+            "signal by itself."
+        )
+    elif divergence["type"] == "bearish":
+        sentence += (
+            " Worth noting: a bearish RSI divergence has formed "
+            f"({divergence['detail']}) — buyers are pushing price higher with "
+            "less momentum, which warrants caution on longs until price proves "
+            "itself."
+        )
+    return sentence
 
 
 def _describe_key_levels(analysis: dict) -> str:

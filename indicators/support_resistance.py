@@ -22,12 +22,33 @@ import config
 # ======================================================
 # SWING DETECTION
 # ======================================================
+def _drop_duplicate_swings(
+    points: pd.Series, full_index: pd.Index, lookback: int
+) -> pd.Series:
+    """
+    Keeps only the first bar of an equal-value swing cluster. Flat tops or
+    bottoms (equal extremes within the fractal window) otherwise register
+    as several swings, which corrupts HH/LL labelling and divergence.
+    """
+    if points.empty:
+        return points
+    positions = full_index.get_indexer(points.index)
+    keep = [0]
+    for i in range(1, len(points)):
+        near_previous = positions[i] - positions[keep[-1]] <= lookback
+        same_value = np.isclose(points.iloc[i], points.iloc[keep[-1]])
+        if not (near_previous and same_value):
+            keep.append(i)
+    return points.iloc[keep]
+
+
 def find_swing_points(
     candles: pd.DataFrame, lookback: int = config.SWING_LOOKBACK
 ) -> tuple[pd.Series, pd.Series]:
     """
     Finds confirmed swing highs and lows (fractals): a bar whose high/low
-    is the extreme among `lookback` bars on each side.
+    is the extreme among `lookback` bars on each side. Equal-value clusters
+    collapse to their first bar.
     Returns (swing_highs, swing_lows) as sparse Series indexed by time.
 
     Shared with market_structure.py, so this one is intentionally public.
@@ -39,7 +60,13 @@ def find_swing_points(
     is_swing_high = highs == highs.rolling(window, center=True).max()
     is_swing_low = lows == lows.rolling(window, center=True).min()
 
-    return highs[is_swing_high.fillna(False)], lows[is_swing_low.fillna(False)]
+    swing_highs = _drop_duplicate_swings(
+        highs[is_swing_high.fillna(False)], candles.index, lookback
+    )
+    swing_lows = _drop_duplicate_swings(
+        lows[is_swing_low.fillna(False)], candles.index, lookback
+    )
+    return swing_highs, swing_lows
 
 
 # ======================================================

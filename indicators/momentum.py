@@ -22,8 +22,9 @@ def _rsi(close: pd.Series, period: int) -> pd.Series:
     losses = -delta.clip(upper=0)
     avg_gain = gains.ewm(alpha=1 / period, adjust=False).mean()
     avg_loss = losses.ewm(alpha=1 / period, adjust=False).mean()
-    relative_strength = avg_gain / avg_loss.replace(0, float("nan"))
-    rsi = 100 - (100 / (1 + relative_strength))
+    # Equivalent to 100 - 100/(1+RS) but stays defined when avg_loss is 0
+    # (pure uptrend -> 100) or avg_gain is 0 (pure downtrend -> 0).
+    rsi = 100 * avg_gain / (avg_gain + avg_loss)
     return rsi.fillna(50.0)  # neutral before enough data
 
 
@@ -57,6 +58,56 @@ def _stochastic_rsi(rsi: pd.Series) -> pd.DataFrame:
     stoch_k = stoch.rolling(config.STOCH_RSI_SMOOTH_K).mean()
     stoch_d = stoch_k.rolling(config.STOCH_RSI_SMOOTH_D).mean()
     return pd.DataFrame({"stoch_rsi_k": stoch_k, "stoch_rsi_d": stoch_d})
+
+
+# ======================================================
+# DIVERGENCE DETECTION (price vs RSI)
+# ======================================================
+def _detect_divergence(candles: pd.DataFrame, rsi: pd.Series) -> dict:
+    """
+    Detects regular divergence between price and RSI on the last two
+    confirmed swings inside DIVERGENCE_LOOKBACK_BARS:
+      - Bullish: price makes a lower low while RSI makes a higher low
+      - Bearish: price makes a higher high while RSI makes a lower high
+    Returns {"type": "bullish"|"bearish"|None, "detail": str}.
+    """
+    from indicators.support_resistance import find_swing_points
+
+    window = candles.tail(config.DIVERGENCE_LOOKBACK_BARS)
+    swing_highs, swing_lows = find_swing_points(window)
+    min_gap = config.DIVERGENCE_MIN_RSI_GAP
+
+    if len(swing_lows) >= 2:
+        (prev_time, prev_low), (last_time, last_low) = (
+            (swing_lows.index[-2], float(swing_lows.iloc[-2])),
+            (swing_lows.index[-1], float(swing_lows.iloc[-1])),
+        )
+        rsi_prev, rsi_last = float(rsi.asof(prev_time)), float(rsi.asof(last_time))
+        if last_low < prev_low and rsi_last > rsi_prev + min_gap:
+            return {
+                "type": "bullish",
+                "detail": (
+                    f"price lower low ({prev_low:.2f} → {last_low:.2f}) while "
+                    f"RSI higher low ({rsi_prev:.0f} → {rsi_last:.0f})"
+                ),
+            }
+
+    if len(swing_highs) >= 2:
+        (prev_time, prev_high), (last_time, last_high) = (
+            (swing_highs.index[-2], float(swing_highs.iloc[-2])),
+            (swing_highs.index[-1], float(swing_highs.iloc[-1])),
+        )
+        rsi_prev, rsi_last = float(rsi.asof(prev_time)), float(rsi.asof(last_time))
+        if last_high > prev_high and rsi_last < rsi_prev - min_gap:
+            return {
+                "type": "bearish",
+                "detail": (
+                    f"price higher high ({prev_high:.2f} → {last_high:.2f}) while "
+                    f"RSI lower high ({rsi_prev:.0f} → {rsi_last:.0f})"
+                ),
+            }
+
+    return {"type": None, "detail": ""}
 
 
 # ======================================================
@@ -105,6 +156,7 @@ def run_momentum_analysis(candles: pd.DataFrame) -> dict:
         macd_state: label including fresh crossovers
         macd_hist: latest histogram value (momentum thrust)
         stoch_rsi_k / stoch_rsi_d: latest stochastic RSI values
+        divergence: {"type": "bullish"|"bearish"|None, "detail": str}
     """
     close = candles["close"]
     series = pd.DataFrame(index=candles.index)
@@ -122,6 +174,7 @@ def run_momentum_analysis(candles: pd.DataFrame) -> dict:
         "macd_hist": float(latest["macd_hist"]),
         "stoch_rsi_k": float(latest["stoch_rsi_k"]) if pd.notna(latest["stoch_rsi_k"]) else 50.0,
         "stoch_rsi_d": float(latest["stoch_rsi_d"]) if pd.notna(latest["stoch_rsi_d"]) else 50.0,
+        "divergence": _detect_divergence(candles, series["rsi"]),
     }
     logging.info(
         "Momentum: RSI %.1f (%s) | MACD %s",

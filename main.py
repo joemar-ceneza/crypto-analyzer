@@ -10,6 +10,8 @@ Usage:
     python main.py                          # ETH/USDT on the default timeframe
     python main.py --symbol BTC/USDT --timeframe 4h
     python main.py --backtest               # also run the strategy backtest
+    python main.py --collect                # incremental data collection only
+                                            # (for Windows Task Scheduler)
 """
 
 import argparse
@@ -35,7 +37,31 @@ def _parse_arguments() -> argparse.Namespace:
                         help="How many candles to analyze")
     parser.add_argument("--backtest", action="store_true",
                         help="Also run the strategy backtest")
+    parser.add_argument("--collect", action="store_true",
+                        help="Run incremental data collection only, then exit "
+                             "(intended for Task Scheduler)")
     return parser.parse_args()
+
+
+def _run_collection_mode() -> None:
+    """Runs the scheduled data-collection workflow (main.py --collect)."""
+    logging.info("=" * 70)
+    logging.info("COLLECTION MODE — updating candle store")
+    logging.info("=" * 70)
+    from data import collector
+
+    collector.run_collection()
+
+
+def _run_confluence_safely(symbol: str) -> dict | None:
+    """Runs confluence analysis; a failure degrades the report, not the run."""
+    from analysis import confluence
+
+    try:
+        return confluence.run_confluence(symbol)
+    except Exception as error:
+        logging.warning("Confluence analysis unavailable: %s", error)
+        return None
 
 
 def _create_folders() -> None:
@@ -51,6 +77,10 @@ def main() -> None:
     _create_folders()
     utils.setup_logging()
     arguments = _parse_arguments()
+
+    if arguments.collect:
+        _run_collection_mode()
+        return
 
     # Step 1: Fetch candle data from the exchange
     logging.info("=" * 70)
@@ -79,16 +109,22 @@ def main() -> None:
     logging.info("=" * 70)
     narrative = analyzer.run_narrative(analysis)
 
-    # Step 5: Render and save the market report
+    # Step 5: Run multi-timeframe confluence
     logging.info("=" * 70)
-    logging.info("STEP 5 — Rendering market report")
+    logging.info("STEP 5 — Running multi-timeframe confluence")
     logging.info("=" * 70)
-    report_generator.generate_report(analysis, narrative)
+    confluence_result = _run_confluence_safely(arguments.symbol)
 
-    # Step 6 (optional): Run the strategy backtest
+    # Step 6: Render and save the market report
+    logging.info("=" * 70)
+    logging.info("STEP 6 — Rendering market report")
+    logging.info("=" * 70)
+    report_generator.generate_report(analysis, narrative, confluence_result)
+
+    # Step 7 (optional): Run the strategy backtest
     if arguments.backtest:
         logging.info("=" * 70)
-        logging.info("STEP 6 — Running strategy backtest")
+        logging.info("STEP 7 — Running strategy backtest")
         logging.info("=" * 70)
         from backtesting import strategy  # heavy import — only when requested
 

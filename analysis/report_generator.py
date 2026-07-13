@@ -113,6 +113,14 @@ def _assess_risk(
             f"Recent Change of Character ({last_event['direction']}) — structure may be turning"
         )
 
+    divergence = momentum_result["divergence"]
+    if divergence["type"]:
+        score += 1
+        reasons.append(
+            f"{divergence['type'].capitalize()} RSI divergence — momentum "
+            f"disagrees with price"
+        )
+
     if volatility_result["bb_squeeze"]:
         score += 1
         reasons.append("Bollinger squeeze — an expansion move may be building")
@@ -175,11 +183,31 @@ def _render_levels(levels: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def generate_report(analysis: dict, summary_text: str = "") -> str:
+def _render_confluence(confluence: dict | None) -> str:
+    """Renders the multi-timeframe confluence section (empty when absent)."""
+    if not confluence:
+        return ""
+    lines = ["\n## Multi-Timeframe Confluence",
+             "| Timeframe | Trend | Structure | RSI | MACD | vs POC | Divergence |",
+             "|---|---|---|---|---|---|---|"]
+    for row in confluence["rows"]:
+        lines.append(
+            f"| {row['timeframe']} | {row['trend']} | {row['structure']} | "
+            f"{row['rsi']:.0f} | {row['macd_state']} | {row['price_vs_poc']} | "
+            f"{row['divergence']} |"
+        )
+    lines.append(f"\n**Verdict:** {confluence['verdict']} (score {confluence['total_score']:+d})")
+    return "\n".join(lines) + "\n"
+
+
+def generate_report(
+    analysis: dict, summary_text: str = "", confluence: dict | None = None
+) -> str:
     """
     Renders the standard market report from an analysis dict, saves it to
     output/reports/, and returns the markdown text.
     `summary_text` — the narrative from the AI layer (optional).
+    `confluence` — result of confluence.run_confluence() (optional).
     """
     profile = analysis["volume_profile"]
     momentum_result = analysis["momentum"]
@@ -220,6 +248,7 @@ def generate_report(analysis: dict, summary_text: str = "") -> str:
 - **RSI:** {momentum_result['rsi']:.1f} — {momentum_result['rsi_state']}
 - **MACD:** {momentum_result['macd_state']} (histogram {momentum_result['macd_hist']:+.2f})
 - **Stoch RSI:** %K {momentum_result['stoch_rsi_k']:.0f} / %D {momentum_result['stoch_rsi_d']:.0f}
+- **Divergence:** {(momentum_result['divergence']['type'] or 'none').capitalize()}{' — ' + momentum_result['divergence']['detail'] if momentum_result['divergence']['type'] else ''}
 - **EMA trend:** {trend_result['ema_alignment']}
 - **ADX:** {trend_result['adx']:.1f} ({'trending' if trend_result['adx'] >= config.ADX_TREND_THRESHOLD else 'weak trend / ranging'})
 - **ATR:** {utils.format_price(analysis['volatility']['atr'])} ({analysis['volatility']['atr_pct']:.2%} of price)
@@ -228,7 +257,7 @@ def generate_report(analysis: dict, summary_text: str = "") -> str:
 ## Market Structure
 - **State:** {structure_result['structure']}
 - **Last event:** {last_event_txt}
-
+{_render_confluence(confluence)}
 ## Analysis Summary
 {summary_text or '_No narrative generated._'}
 

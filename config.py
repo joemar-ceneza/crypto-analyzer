@@ -88,6 +88,18 @@ BOLLINGER_PERIOD = 20
 BOLLINGER_STD = 2.0
 
 # ======================================================
+# DIVERGENCE DETECTION
+# ======================================================
+DIVERGENCE_LOOKBACK_BARS = 80    # only swings inside this window count
+DIVERGENCE_MIN_RSI_GAP = 2.0     # RSI must differ by this much between swings
+
+# ======================================================
+# MULTI-TIMEFRAME CONFLUENCE
+# ======================================================
+CONFLUENCE_TIMEFRAMES = ["1h", "4h", "1d"]
+CONFLUENCE_CANDLES = 600         # candles fetched per timeframe (EMA200 needs 200+)
+
+# ======================================================
 # MARKET STRUCTURE
 # ======================================================
 STRUCTURE_SWING_LOOKBACK = 5     # swing sensitivity for HH/HL/LH/LL detection
@@ -109,6 +121,16 @@ BACKTEST_RSI_BUY = 35            # BUY: RSI below this ...
 BACKTEST_RSI_SELL = 70           # SELL: RSI above this ...
 BACKTEST_USE_VAL_FILTER = True   # BUY requires price below VAL
 BACKTEST_USE_VAH_TARGET = True   # SELL triggers when price reaches VAH
+
+# Parameter sweep grid for the dashboard strategy lab
+SWEEP_RSI_BUY = [25, 30, 35, 40]
+SWEEP_RSI_SELL = [60, 65, 70, 75]
+
+# ======================================================
+# DATA COLLECTION (main.py --collect, for Task Scheduler)
+# ======================================================
+COLLECT_SYMBOLS = SYMBOL_CHOICES  # symbols kept warm by scheduled collection
+COLLECT_TIMEFRAMES = TIMEFRAMES   # timeframes kept warm per symbol
 
 # ======================================================
 # DASHBOARD

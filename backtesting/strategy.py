@@ -1,17 +1,19 @@
 """
 Strategy backtesting with VectorBT.
 
-Default rule set (all tunable in config.py):
-    BUY  when: price below trailing VAL  AND  RSI below 35  AND  MACD bullish crossover
-    SELL when: price reaches trailing VAH  OR  RSI above 70
+Default rule set (defaults in config.py, every value overridable per run):
+    BUY  when: price below trailing VAL  AND  RSI below rsi_buy  AND  MACD bullish crossover
+    SELL when: price reaches trailing VAH  OR  RSI above rsi_sell
 
 Honesty note: VAL/VAH are recomputed from a TRAILING window at each step
 (no look-ahead) — using the final chart profile would leak future data
 into historical signals.
 
 Public API:
-    generate_signals(candles) -> DataFrame with entries/exits/val/vah/rsi
-    run_backtest(candles)     -> dict with stats, equity curve, trades, signals
+    default_rules()                     -> dict of the config-default rule set
+    generate_signals(candles, rules)    -> DataFrame with entries/exits/val/vah/rsi
+    run_backtest(candles, rules)        -> dict with stats, equity curve, trades, signals
+    run_parameter_sweep(candles, ...)   -> DataFrame ranking rule combinations
 """
 
 import logging
@@ -25,6 +27,29 @@ from indicators import momentum, volume_profile
 # Recompute the trailing volume profile every N bars — a profile shifts
 # slowly, and recomputing per-bar adds cost without changing signals much.
 _PROFILE_RECALC_EVERY = 10
+
+
+# ======================================================
+# RULE SET
+# ======================================================
+def default_rules() -> dict:
+    """Returns the config-default strategy rules as an overridable dict."""
+    return {
+        "rsi_buy": config.BACKTEST_RSI_BUY,
+        "rsi_sell": config.BACKTEST_RSI_SELL,
+        "use_val_filter": config.BACKTEST_USE_VAL_FILTER,
+        "use_vah_target": config.BACKTEST_USE_VAH_TARGET,
+        "initial_cash": config.BACKTEST_INITIAL_CASH,
+        "fees": config.BACKTEST_FEES,
+    }
+
+
+def _merge_rules(rules: dict | None) -> dict:
+    """Overlays user-supplied rules on the defaults."""
+    merged = default_rules()
+    if rules:
+        merged.update(rules)
+    return merged
 
 
 # ======================================================
@@ -56,54 +81,83 @@ def _trailing_value_area(candles: pd.DataFrame) -> pd.DataFrame:
 # ======================================================
 # SIGNAL GENERATION
 # ======================================================
-def generate_signals(candles: pd.DataFrame) -> pd.DataFrame:
+def _compute_signal_inputs(candles: pd.DataFrame) -> dict:
     """
-    Builds boolean entry/exit signal columns from the rule set.
-    Returns a DataFrame: entries, exits, val, vah, rsi, macd_cross_up.
-    Also used by the dashboard to place buy/sell markers on the chart.
+    Computes the rule inputs (RSI, MACD crossover, trailing value area) once
+    so a parameter sweep can rebuild signals cheaply for many rule combos.
     """
-    momentum_result = momentum.run_momentum_analysis(candles)
-    momentum_series = momentum_result["series"]
-    value_area = _trailing_value_area(candles)
-
-    close = candles["close"]
-    rsi = momentum_series["rsi"]
+    momentum_series = momentum.run_momentum_analysis(candles)["series"]
     macd_line = momentum_series["macd"]
     macd_signal = momentum_series["macd_signal"]
-    macd_cross_up = (macd_line > macd_signal) & (
-        macd_line.shift(1) <= macd_signal.shift(1)
-    )
+    return {
+        "close": candles["close"],
+        "rsi": momentum_series["rsi"],
+        "macd_cross_up": (macd_line > macd_signal)
+        & (macd_line.shift(1) <= macd_signal.shift(1)),
+        "value_area": _trailing_value_area(candles),
+    }
 
-    entries = (rsi < config.BACKTEST_RSI_BUY) & macd_cross_up
-    if config.BACKTEST_USE_VAL_FILTER:
+
+def _build_signals(inputs: dict, rules: dict) -> pd.DataFrame:
+    """Applies one rule set to precomputed inputs; returns the signal frame."""
+    close, rsi = inputs["close"], inputs["rsi"]
+    value_area = inputs["value_area"]
+
+    entries = (rsi < rules["rsi_buy"]) & inputs["macd_cross_up"]
+    if rules["use_val_filter"]:
         entries &= close < value_area["val"]
 
-    exits = rsi > config.BACKTEST_RSI_SELL
-    if config.BACKTEST_USE_VAH_TARGET:
+    exits = rsi > rules["rsi_sell"]
+    if rules["use_vah_target"]:
         exits |= close >= value_area["vah"]
-    # No exits before history warms up (VAL/VAH still NaN -> comparisons False)
+    # No signals before history warms up (VAL/VAH NaN -> comparisons False)
 
-    signals = pd.DataFrame(
+    return pd.DataFrame(
         {
             "entries": entries.fillna(False),
             "exits": exits.fillna(False),
             "val": value_area["val"],
             "vah": value_area["vah"],
             "rsi": rsi,
-            "macd_cross_up": macd_cross_up.fillna(False),
+            "macd_cross_up": inputs["macd_cross_up"].fillna(False),
         },
-        index=candles.index,
+        index=close.index,
     )
+
+
+def generate_signals(candles: pd.DataFrame, rules: dict | None = None) -> pd.DataFrame:
+    """
+    Builds boolean entry/exit signal columns from the rule set (defaults
+    from config.py unless overridden). Also used by the dashboard to place
+    buy/sell markers on the chart.
+    """
+    merged = _merge_rules(rules)
+    signals = _build_signals(_compute_signal_inputs(candles), merged)
     logging.info(
-        "Signals generated: %d entries, %d exit conditions",
+        "Signals generated (RSI<%s / RSI>%s): %d entries, %d exit conditions",
+        merged["rsi_buy"], merged["rsi_sell"],
         int(signals["entries"].sum()), int(signals["exits"].sum()),
     )
     return signals
 
 
 # ======================================================
-# STATS EXTRACTION
+# PORTFOLIO / STATS
 # ======================================================
+def _build_portfolio(close: pd.Series, signals: pd.DataFrame, rules: dict):
+    """Runs one VectorBT portfolio simulation for a signal frame."""
+    import vectorbt as vbt  # heavy import — only loaded when backtesting
+
+    return vbt.Portfolio.from_signals(
+        close=close,
+        entries=signals["entries"],
+        exits=signals["exits"],
+        init_cash=rules["initial_cash"],
+        fees=rules["fees"],
+        freq=pd.infer_freq(close.index) or "1h",
+    )
+
+
 def _extract_stats(portfolio) -> dict:
     """Pulls the headline numbers out of a vectorbt Portfolio."""
     trades = portfolio.trades
@@ -126,11 +180,12 @@ def _extract_stats(portfolio) -> dict:
 
 
 # ======================================================
-# PUBLIC ENTRY POINT
+# PUBLIC ENTRY POINTS
 # ======================================================
-def run_backtest(candles: pd.DataFrame) -> dict:
+def run_backtest(candles: pd.DataFrame, rules: dict | None = None) -> dict:
     """
-    Runs the default strategy over a candle DataFrame with VectorBT.
+    Runs the strategy over a candle DataFrame with VectorBT.
+    `rules` overrides any subset of default_rules().
 
     Returns a dict:
         stats: total_trades / win_rate_pct / total_return_pct /
@@ -138,24 +193,16 @@ def run_backtest(candles: pd.DataFrame) -> dict:
         equity_curve: Series of portfolio value over time
         trades: DataFrame of individual trades (entry/exit/pnl)
         signals: the signal DataFrame used (for chart markers)
+        rules: the merged rule set that actually ran
     """
-    import vectorbt as vbt  # heavy import — only loaded when backtesting
-
     if len(candles) < 100:
         raise ValueError("Backtest needs at least 100 candles.")
 
-    signals = generate_signals(candles)
-    portfolio = vbt.Portfolio.from_signals(
-        close=candles["close"],
-        entries=signals["entries"],
-        exits=signals["exits"],
-        init_cash=config.BACKTEST_INITIAL_CASH,
-        fees=config.BACKTEST_FEES,
-        freq=pd.infer_freq(candles.index) or "1h",
-    )
+    merged = _merge_rules(rules)
+    signals = generate_signals(candles, merged)
+    portfolio = _build_portfolio(candles["close"], signals, merged)
 
     stats = _extract_stats(portfolio)
-    trades_frame = portfolio.trades.records_readable
     logging.info(
         "Backtest: %d trades | win rate %.1f%% | return %.2f%% | max DD %.2f%%",
         stats["total_trades"], stats["win_rate_pct"],
@@ -164,6 +211,45 @@ def run_backtest(candles: pd.DataFrame) -> dict:
     return {
         "stats": stats,
         "equity_curve": portfolio.value(),
-        "trades": trades_frame,
+        "trades": portfolio.trades.records_readable,
         "signals": signals,
+        "rules": merged,
     }
+
+
+def run_parameter_sweep(
+    candles: pd.DataFrame,
+    rsi_buy_values: list[int] | None = None,
+    rsi_sell_values: list[int] | None = None,
+    base_rules: dict | None = None,
+) -> pd.DataFrame:
+    """
+    Backtests every rsi_buy x rsi_sell combination over the same data and
+    returns a DataFrame ranked by total return. Inputs (RSI, MACD, trailing
+    value area) are computed once and reused for every combination.
+    """
+    if len(candles) < 100:
+        raise ValueError("Parameter sweep needs at least 100 candles.")
+
+    rsi_buy_values = rsi_buy_values or config.SWEEP_RSI_BUY
+    rsi_sell_values = rsi_sell_values or config.SWEEP_RSI_SELL
+    inputs = _compute_signal_inputs(candles)
+    merged_base = _merge_rules(base_rules)
+
+    results: list[dict] = []
+    for rsi_buy in rsi_buy_values:
+        for rsi_sell in rsi_sell_values:
+            if rsi_sell <= rsi_buy:
+                continue  # nonsensical combination
+            rules = {**merged_base, "rsi_buy": rsi_buy, "rsi_sell": rsi_sell}
+            signals = _build_signals(inputs, rules)
+            portfolio = _build_portfolio(candles["close"], signals, rules)
+            stats = _extract_stats(portfolio)
+            results.append({"rsi_buy": rsi_buy, "rsi_sell": rsi_sell, **stats})
+
+    sweep = pd.DataFrame(results).sort_values("total_return_pct", ascending=False)
+    logging.info(
+        "Parameter sweep: %d combinations, best return %.2f%%",
+        len(sweep), float(sweep["total_return_pct"].iloc[0]) if not sweep.empty else 0.0,
+    )
+    return sweep.reset_index(drop=True)

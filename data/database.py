@@ -119,3 +119,18 @@ def get_candle_count(symbol: str, timeframe: str) -> int:
             (symbol, timeframe),
         )
         return int(cursor.fetchone()[0])
+
+
+def get_latest_timestamp(symbol: str, timeframe: str) -> int | None:
+    """
+    Returns the newest stored candle timestamp (epoch ms) for
+    symbol/timeframe, or None when nothing is stored yet.
+    Used by the collector to fetch only missing candles.
+    """
+    with _connect() as connection:
+        cursor = connection.execute(
+            "SELECT MAX(timestamp) FROM candles WHERE symbol = ? AND timeframe = ?",
+            (symbol, timeframe),
+        )
+        value = cursor.fetchone()[0]
+        return int(value) if value is not None else None
