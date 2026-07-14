@@ -83,6 +83,37 @@ Scheduler job at your venv's full `python.exe` path with `main.py --collect`
 as arguments and this folder as the working directory (e.g. hourly), and
 the candle history grows on its own.
 
+## Telegram sell-signal alerts
+Get a Telegram message when a **new sell signal** fires (RSI > 70 or price
+reaches the trailing VAH — the same rule as the chart's sell markers) on the
+symbols in `config.ALERT_SYMBOLS`.
+
+**One-time setup (~2 minutes):**
+1. In Telegram, message **@BotFather**, send `/newbot`, follow the prompts,
+   and copy the **bot token** it gives you.
+2. Message **@userinfobot** (or your new bot, then check
+   `https://api.telegram.org/bot<token>/getUpdates`) to get your numeric
+   **chat id**.
+3. Copy `.env.example` to `.env` and fill in:
+   ```
+   TELEGRAM_BOT_TOKEN=123456:ABC-your-token
+   TELEGRAM_CHAT_ID=123456789
+   ```
+4. Verify it works:
+   ```
+   python main.py --test-alert
+   ```
+   You should receive a confirmation message in Telegram.
+
+**Run the check (Task Scheduler):**
+```
+python main.py --alerts
+```
+Each run alerts only on a signal that fired within the last
+`ALERT_RECENT_BARS` closed candles and that it hasn't alerted before (tracked
+in `output/alert_state.json`), so scheduling it hourly won't spam or repeat.
+`.env` is gitignored — your token never leaves your machine.
+
 ## Default Strategy Rules (backtest & chart markers)
 - **BUY:** price below trailing VAL **and** RSI < 35 **and** MACD bullish crossover
 - **SELL:** price reaches trailing VAH **or** RSI > 70
@@ -120,6 +151,9 @@ crypto-analyzer/
 │   └── report_generator.py     # analysis aggregation + markdown report
 ├── backtesting/
 │   └── strategy.py             # tunable rules + VectorBT + parameter sweep
+├── alerts/
+│   ├── notifier.py             # Telegram sender (credentials from .env)
+│   └── signal_watcher.py       # new sell-signal detection + dedup state
 ├── ai/
 │   └── analyzer.py             # rule-based narrative (no API key needed)
 ├── dashboard/

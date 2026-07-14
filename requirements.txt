@@ -5,3 +5,4 @@ plotly
 streamlit
 vectorbt
 python-dotenv
+requests

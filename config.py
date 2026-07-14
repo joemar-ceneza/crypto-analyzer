@@ -133,6 +133,18 @@ COLLECT_SYMBOLS = SYMBOL_CHOICES  # symbols kept warm by scheduled collection
 COLLECT_TIMEFRAMES = TIMEFRAMES   # timeframes kept warm per symbol
 
 # ======================================================
+# SELL-SIGNAL ALERTS (main.py --alerts, Telegram)
+# ======================================================
+# Credentials live in .env, never here:
+#   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+ALERT_SYMBOLS = ["ETH/USDT", "BTC/USDT"]  # symbols watched for sell signals
+ALERT_TIMEFRAME = "1h"                     # timeframe the alert rule runs on
+ALERT_CANDLES = 600                        # candles fetched per alert check
+ALERT_RECENT_BARS = 3                      # only alert if the signal fired within
+                                           # this many latest closed candles
+ALERT_STATE_FILE = os.path.join(OUTPUT_DIR, "alert_state.json")
+
+# ======================================================
 # DASHBOARD
 # ======================================================
 DASHBOARD_TITLE = "Crypto Market Intelligence"

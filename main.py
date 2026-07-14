@@ -12,17 +12,25 @@ Usage:
     python main.py --backtest               # also run the strategy backtest
     python main.py --collect                # incremental data collection only
                                             # (for Windows Task Scheduler)
+    python main.py --alerts                 # check for new sell signals, notify
+                                            # via Telegram, then exit (scheduled)
+    python main.py --test-alert             # send a Telegram test message
 """
 
 import argparse
 import logging
 import os
 
+from dotenv import load_dotenv
+
 import config
 import utils
 from ai import analyzer
 from analysis import report_generator
 from data import database, exchange
+
+# Load .env so Telegram credentials are available to the alert modules.
+load_dotenv(os.path.join(config.BASE_DIR, ".env"))
 
 
 def _parse_arguments() -> argparse.Namespace:
@@ -40,6 +48,11 @@ def _parse_arguments() -> argparse.Namespace:
     parser.add_argument("--collect", action="store_true",
                         help="Run incremental data collection only, then exit "
                              "(intended for Task Scheduler)")
+    parser.add_argument("--alerts", action="store_true",
+                        help="Check for new sell signals and send Telegram "
+                             "notifications, then exit (intended for Task Scheduler)")
+    parser.add_argument("--test-alert", action="store_true",
+                        help="Send a Telegram test message to verify setup, then exit")
     return parser.parse_args()
 
 
@@ -51,6 +64,32 @@ def _run_collection_mode() -> None:
     from data import collector
 
     collector.run_collection()
+
+
+def _run_alert_mode() -> None:
+    """Runs the scheduled sell-signal alert check (main.py --alerts)."""
+    logging.info("=" * 70)
+    logging.info("ALERT MODE — checking for new sell signals")
+    logging.info("=" * 70)
+    from alerts import signal_watcher
+
+    signal_watcher.run_alert_check()
+
+
+def _run_test_alert() -> None:
+    """Sends a Telegram test message (main.py --test-alert)."""
+    from alerts import notifier
+
+    if notifier.send_telegram(
+        "✅ <b>crypto-analyzer</b> alerts are working. "
+        "You'll be notified here when a sell signal fires."
+    ):
+        logging.info("Test alert sent — check your Telegram.")
+    else:
+        logging.warning(
+            "Test alert not sent. Add TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID "
+            "to .env (see README) and try again."
+        )
 
 
 def _run_confluence_safely(symbol: str) -> dict | None:
@@ -80,6 +119,14 @@ def main() -> None:
 
     if arguments.collect:
         _run_collection_mode()
+        return
+
+    if arguments.test_alert:
+        _run_test_alert()
+        return
+
+    if arguments.alerts:
+        _run_alert_mode()
         return
 
     # Step 1: Fetch candle data from the exchange
