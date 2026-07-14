@@ -40,6 +40,16 @@ def test_notifier_reports_configured(monkeypatch):
     assert notifier.is_configured() is True
 
 
+def test_recipients_parses_comma_separated(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", " 123 , @chan ,, 456 ")
+    assert notifier._recipients() == ["123", "@chan", "456"]
+
+
+def test_recipients_empty_when_unset(monkeypatch):
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    assert notifier._recipients() == []
+
+
 # ---- fresh-edge detection ----
 def test_detects_fresh_sell_edge():
     _closed, signals = _sell_signals()

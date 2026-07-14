@@ -113,6 +113,15 @@ cooldown (`ALERT_COOLDOWN_BARS`) prevents spam.
    ```
    You should receive a confirmation message in Telegram.
 
+**Sharing signals with others.** `TELEGRAM_CHAT_ID` accepts a comma-separated
+list, so you can notify several people or a channel:
+- **Multiple people:** `TELEGRAM_CHAT_ID=111111,222222` (each person must have
+  sent your bot `/start` first — Telegram only lets a bot message people who
+  contacted it).
+- **A channel (easiest):** create a Telegram channel, add your bot as an
+  admin, and set `TELEGRAM_CHAT_ID=@your_channel`. Anyone you invite to the
+  channel receives the signals — no need for their personal chat id.
+
 **Run the check (Task Scheduler):**
 ```
 python main.py --alerts

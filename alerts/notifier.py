@@ -3,13 +3,15 @@ Telegram notification sender.
 
 Reads credentials from environment variables (loaded from .env by main.py):
     TELEGRAM_BOT_TOKEN   the bot token from @BotFather
-    TELEGRAM_CHAT_ID     your personal chat id (from @userinfobot)
+    TELEGRAM_CHAT_ID     one or more recipients, comma-separated. Each may be
+                         a personal chat id (from @userinfobot), a group id, or
+                         a channel (@channelname or its -100… numeric id).
 
 Credentials are never logged.
 
 Public API:
     is_configured()      -> bool
-    send_telegram(text)  -> bool  (True when delivered)
+    send_telegram(text)  -> bool  (True when delivered to at least one recipient)
 """
 
 import logging
@@ -25,34 +27,23 @@ _TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
 # ======================================================
 # INTERNAL HELPERS
 # ======================================================
-def _credentials() -> tuple[str | None, str | None]:
-    """Returns (bot_token, chat_id) from the environment, or (None, None)."""
-    return os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
+def _token() -> str | None:
+    """Returns the bot token from the environment."""
+    return os.getenv("TELEGRAM_BOT_TOKEN")
 
 
-# ======================================================
-# PUBLIC API
-# ======================================================
-def is_configured() -> bool:
-    """True when both Telegram credentials are present in the environment."""
-    token, chat_id = _credentials()
-    return bool(token and chat_id)
-
-
-def send_telegram(text: str) -> bool:
+def _recipients() -> list[str]:
     """
-    Sends `text` (HTML-formatted) to the configured Telegram chat.
-    Returns True on success, False when unconfigured or on send failure.
-    Never raises — a failed notification must not crash a scheduled run.
+    Parses TELEGRAM_CHAT_ID into a list of recipients. Supports a single id or
+    a comma-separated list (e.g. '12345,@mychannel,-100987'). Blank entries and
+    surrounding whitespace are ignored.
     """
-    token, chat_id = _credentials()
-    if not (token and chat_id):
-        logging.warning(
-            "Telegram not configured — set TELEGRAM_BOT_TOKEN and "
-            "TELEGRAM_CHAT_ID in .env to enable alerts."
-        )
-        return False
+    raw = os.getenv("TELEGRAM_CHAT_ID", "")
+    return [chat_id.strip() for chat_id in raw.split(",") if chat_id.strip()]
 
+
+def _send_one(token: str, chat_id: str, text: str) -> bool:
+    """Sends `text` to a single chat id. Returns True on success (never raises)."""
     url = _TELEGRAM_API.format(token=token)
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
 
@@ -63,8 +54,40 @@ def send_telegram(text: str) -> bool:
 
     try:
         utils.retry(_post)
-        logging.info("Telegram notification sent.")
         return True
-    except Exception as error:  # noqa: BLE001 — never let alerts crash the caller
-        logging.error("Telegram send failed: %s", error)
+    except Exception as error:  # noqa: BLE001 — one bad recipient must not stop the rest
+        logging.error("Telegram send to %s failed: %s", chat_id, error)
         return False
+
+
+# ======================================================
+# PUBLIC API
+# ======================================================
+def is_configured() -> bool:
+    """True when a bot token and at least one recipient are present."""
+    return bool(_token() and _recipients())
+
+
+def send_telegram(text: str) -> bool:
+    """
+    Sends `text` (HTML-formatted) to every configured Telegram recipient.
+    Returns True if at least one recipient received it, False when unconfigured
+    or when every send failed. Never raises — a failed notification must not
+    crash a scheduled run.
+    """
+    token = _token()
+    recipients = _recipients()
+    if not (token and recipients):
+        logging.warning(
+            "Telegram not configured — set TELEGRAM_BOT_TOKEN and "
+            "TELEGRAM_CHAT_ID in .env to enable alerts."
+        )
+        return False
+
+    delivered = sum(_send_one(token, chat_id, text) for chat_id in recipients)
+    if delivered:
+        logging.info("Telegram notification sent to %d of %d recipient(s).",
+                     delivered, len(recipients))
+        return True
+    logging.error("Telegram notification failed for all %d recipient(s).", len(recipients))
+    return False

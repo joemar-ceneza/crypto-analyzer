@@ -69,7 +69,7 @@ def _run_collection_mode() -> None:
 def _run_alert_mode() -> None:
     """Runs the scheduled sell-signal alert check (main.py --alerts)."""
     logging.info("=" * 70)
-    logging.info("ALERT MODE — checking for new sell signals")
+    logging.info("ALERT MODE — checking for new buy/sell signals")
     logging.info("=" * 70)
     from alerts import signal_watcher
 
