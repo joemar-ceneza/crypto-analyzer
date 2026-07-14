@@ -1,18 +1,20 @@
 """
-Sell-signal watcher.
+Signal watcher.
 
-Checks each watched symbol for a NEW sell signal on the latest closed candle
-and sends a Telegram notification. A JSON state file records the timestamp of
-the last signal alerted per symbol so the same signal never notifies twice.
+Checks each watched symbol for a NEW buy or sell signal on the latest closed
+candle and sends a Telegram notification with market context. Every fresh
+signal (whether or not it alerts) is also written to the signal-history log.
 
-The sell rule is the project's strategy exit condition (config.BACKTEST_RSI_SELL
-and the trailing VAH target) — the same rule that paints the chart's sell
-markers. Only the *rising edge* of the exit condition counts as a signal, and
-only when it lands within the last ALERT_RECENT_BARS closed candles, so a
-scheduled run never fires on stale history.
+Rules mirror the strategy the chart draws:
+    BUY  — price below trailing VAL and RSI < rsi_buy and MACD bullish crossover
+    SELL — price reaches trailing VAH or RSI > rsi_sell
+
+Only the *rising edge* of a condition counts, only within the last
+ALERT_RECENT_BARS closed candles, and a per-symbol/side cooldown plus a state
+file prevent duplicate or spammy alerts.
 
 Public API:
-    run_alert_check(symbols, timeframe) -> int  (number of alerts sent)
+    run_alert_check(symbols, timeframe) -> int  (alerts sent)
 """
 
 import json
@@ -24,15 +26,21 @@ import pandas as pd
 import config
 import utils
 from alerts import notifier
+from analysis import report_generator
 from backtesting import strategy
-from data import exchange
+from data import exchange, signal_log
+
+_SIDES = [
+    ("SELL", "exits", config.ALERT_ON_SELL, "🔻"),
+    ("BUY", "entries", config.ALERT_ON_BUY, "🟢"),
+]
 
 
 # ======================================================
 # STATE PERSISTENCE
 # ======================================================
 def _load_state() -> dict:
-    """Loads the alert state (last-alerted candle ms per 'symbol|timeframe')."""
+    """Loads the alert state (last-alerted candle ms per 'symbol|timeframe|side')."""
     if not os.path.exists(config.ALERT_STATE_FILE):
         return {}
     try:
@@ -53,56 +61,128 @@ def _save_state(state: dict) -> None:
 # ======================================================
 # SIGNAL DETECTION
 # ======================================================
-def _latest_sell_signal(candles: pd.DataFrame) -> tuple | None:
+def _fresh_edge(signals: pd.DataFrame, column: str) -> tuple | None:
     """
-    Finds the most recent fresh sell signal on the CLOSED candles.
-    Drops the last (still-forming) candle, then looks for the rising edge of
-    the exit condition. Returns (edge_time, candle_row, signal_row) when the
-    edge is within the last ALERT_RECENT_BARS candles, else None.
+    Returns (edge_time, signal_row) for the most recent rising edge of the
+    given signal column, if it lands within the last ALERT_RECENT_BARS
+    candles; otherwise None.
     """
-    closed = candles.iloc[:-1]  # exclude the forming candle to avoid repaint
-    if len(closed) < 120:
-        return None
-
-    signals = strategy.generate_signals(closed)
-    exits = signals["exits"]
-    rising_edges = exits & ~exits.shift(1, fill_value=False)
-    fired = rising_edges[rising_edges]
+    flags = signals[column]
+    rising = flags & ~flags.shift(1, fill_value=False)
+    fired = rising[rising]
     if fired.empty:
         return None
 
     edge_time = fired.index[-1]
-    bars_from_end = len(closed) - 1 - closed.index.get_loc(edge_time)
+    bars_from_end = len(signals) - 1 - signals.index.get_loc(edge_time)
     if bars_from_end >= config.ALERT_RECENT_BARS:
-        return None  # signal is too old — not a fresh alert
+        return None
+    return edge_time, signals.loc[edge_time]
 
-    return edge_time, closed.loc[edge_time], signals.loc[edge_time]
+
+def _timeframe_ms(index: pd.DatetimeIndex) -> int:
+    """Infers the candle interval in milliseconds from the index spacing."""
+    if len(index) < 2:
+        return 0
+    return int((index[-1] - index[-2]).total_seconds() * 1000)
+
+
+# ======================================================
+# MESSAGE BUILDING
+# ======================================================
+def _context_line(analysis: dict) -> str:
+    """One-line 'why now' market context from a full analysis dict."""
+    momentum = analysis["momentum"]
+    return (
+        f"Trend: {analysis['trend']['trend']} · "
+        f"Structure: {analysis['structure']['structure']} · "
+        f"RSI {momentum['rsi']:.0f} ({momentum['rsi_state']}) · "
+        f"Risk: {analysis['risk']['level']}"
+    )
+
+
+def _reason_text(side: str, signal_row: pd.Series) -> str:
+    """Human-readable trigger reason for a buy/sell signal row."""
+    price = float(signal_row["close"])
+    rsi = float(signal_row["rsi"])
+    if side == "SELL":
+        reasons = []
+        if rsi > config.BACKTEST_RSI_SELL:
+            reasons.append(f"RSI {rsi:.0f} &gt; {config.BACKTEST_RSI_SELL}")
+        vah = signal_row["vah"]
+        if pd.notna(vah) and price >= float(vah):
+            reasons.append(f"price reached VAH {utils.format_price(float(vah))}")
+        return " and ".join(reasons) or "sell rule met"
+
+    reasons = [f"RSI {rsi:.0f} &lt; {config.BACKTEST_RSI_BUY}", "MACD bullish crossover"]
+    val = signal_row["val"]
+    if pd.notna(val) and price < float(val):
+        reasons.append(f"price below VAL {utils.format_price(float(val))}")
+    return " and ".join(reasons)
 
 
 def _format_message(
-    symbol: str, timeframe: str, edge_time, candle: pd.Series, signal_row: pd.Series
+    side: str, icon: str, symbol: str, timeframe: str,
+    edge_time, signal_row: pd.Series, analysis: dict,
 ) -> str:
-    """Builds the HTML Telegram message for a sell signal."""
-    price = float(candle["close"])
-    rsi = float(signal_row["rsi"])
-    vah = float(signal_row["vah"]) if pd.notna(signal_row["vah"]) else None
-
-    reasons = []
-    if rsi > config.BACKTEST_RSI_SELL:
-        reasons.append(f"RSI {rsi:.0f} &gt; {config.BACKTEST_RSI_SELL}")
-    if vah is not None and price >= vah:
-        reasons.append(f"price reached VAH {utils.format_price(vah)}")
-    reason_text = " and ".join(reasons) or "sell rule met"
-
+    """Builds the HTML Telegram message for a buy/sell signal."""
+    price = utils.format_price(float(signal_row["close"]))
     when = edge_time.strftime("%Y-%m-%d %H:%M UTC")
     return (
-        f"🔻 <b>SELL signal — {symbol}</b> ({timeframe})\n"
-        f"Price: <b>{utils.format_price(price)}</b>\n"
-        f"Trigger: {reason_text}\n"
-        f"Candle close: {when}\n\n"
+        f"{icon} <b>{side} signal — {symbol}</b> ({timeframe})\n"
+        f"Price: <b>{price}</b>\n"
+        f"Trigger: {_reason_text(side, signal_row)}\n"
+        f"Candle close: {when}\n"
+        f"{_context_line(analysis)}\n\n"
         f"<i>Technical signal only — not financial advice. "
         f"Confirm before acting.</i>"
     )
+
+
+# ======================================================
+# PER-SYMBOL CHECK
+# ======================================================
+def _check_symbol(symbol: str, timeframe: str, state: dict) -> int:
+    """Checks one symbol for fresh buy/sell alerts. Returns alerts sent."""
+    candles = exchange.fetch_candles(symbol, timeframe, config.ALERT_CANDLES)
+    closed = candles.iloc[:-1]  # drop the forming candle (avoid repaint)
+    if len(closed) < 120:
+        return 0
+
+    signals = strategy.generate_signals(closed)
+    signal_log.log_signals(symbol, timeframe, signals)  # history grows every run
+
+    timeframe_ms = _timeframe_ms(closed.index)
+    analysis = None  # computed lazily, only when a fresh signal needs context
+    sent = 0
+
+    for side, column, enabled, icon in _SIDES:
+        if not enabled:
+            continue
+        edge = _fresh_edge(signals, column)
+        if edge is None:
+            continue
+
+        edge_time, signal_row = edge
+        edge_ms = int(edge_time.value // 1_000_000)
+        key = f"{symbol}|{timeframe}|{side}"
+        last_ms = state.get(key, 0)
+        if edge_ms <= last_ms:
+            continue  # already alerted this signal
+        if timeframe_ms and edge_ms - last_ms < config.ALERT_COOLDOWN_BARS * timeframe_ms:
+            continue  # within cooldown window
+
+        if analysis is None:
+            analysis = report_generator.run_analysis(symbol, timeframe, candles)
+        message = _format_message(
+            side, icon, symbol, timeframe, edge_time, signal_row, analysis
+        )
+        if notifier.send_telegram(message):
+            state[key] = edge_ms
+            sent += 1
+            logging.info("%s-signal alert sent for %s %s", side, symbol, timeframe)
+
+    return sent
 
 
 # ======================================================
@@ -112,8 +192,9 @@ def run_alert_check(
     symbols: list[str] | None = None, timeframe: str | None = None
 ) -> int:
     """
-    Checks every watched symbol for a new sell signal and notifies via Telegram.
-    Individual symbol failures are logged and skipped. Returns alerts sent.
+    Checks every watched symbol for new buy/sell signals, logs them to the
+    signal history, and notifies via Telegram (when configured). Individual
+    symbol failures are logged and skipped. Returns alerts sent.
     """
     symbols = symbols or config.ALERT_SYMBOLS
     timeframe = timeframe or config.ALERT_TIMEFRAME
@@ -129,25 +210,10 @@ def run_alert_check(
     sent = 0
     for symbol in symbols:
         try:
-            candles = exchange.fetch_candles(symbol, timeframe, config.ALERT_CANDLES)
-            signal = _latest_sell_signal(candles)
-            if signal is None:
-                continue
-
-            edge_time, candle, signal_row = signal
-            edge_ms = int(edge_time.value // 1_000_000)
-            key = f"{symbol}|{timeframe}"
-            if edge_ms <= state.get(key, 0):
-                continue  # already alerted this signal
-
-            message = _format_message(symbol, timeframe, edge_time, candle, signal_row)
-            if notifier.send_telegram(message):
-                state[key] = edge_ms
-                sent += 1
-                logging.info("Sell-signal alert sent for %s %s", symbol, timeframe)
+            sent += _check_symbol(symbol, timeframe, state)
         except Exception as error:  # noqa: BLE001 — one bad symbol must not stop the rest
             logging.error("Alert check failed for %s: %s", symbol, error)
 
     _save_state(state)
-    logging.info("Alert check complete: %d new sell-signal alert(s) sent.", sent)
+    logging.info("Alert check complete: %d new alert(s) sent.", sent)
     return sent

@@ -17,6 +17,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -28,7 +30,7 @@ import utils
 from ai import analyzer
 from analysis import confluence, report_generator
 from backtesting import strategy
-from data import database, exchange
+from data import database, exchange, signal_log
 
 utils.setup_logging()
 
@@ -95,6 +97,52 @@ def _load_confluence(symbol: str) -> dict | None:
         return None
 
 
+def _latest_signal_label(signals: pd.DataFrame) -> str:
+    """Most recent buy/sell rising edge as 'BUY (n bars ago)' or '—'."""
+    def _last_edge(column: str):
+        edges = signals[column] & ~signals[column].shift(1, fill_value=False)
+        return signals.index[edges][-1] if edges.any() else None
+
+    last_buy, last_sell = _last_edge("entries"), _last_edge("exits")
+    if last_buy is None and last_sell is None:
+        return "—"
+    if last_sell is None or (last_buy is not None and last_buy > last_sell):
+        side, when = "BUY", last_buy
+    else:
+        side, when = "SELL", last_sell
+    bars_ago = len(signals) - 1 - signals.index.get_loc(when)
+    return f"{side} ({bars_ago} bars ago)"
+
+
+@st.cache_data(ttl=300, show_spinner="Scanning watchlist…")
+def _scan_watchlist(symbols: tuple[str, ...], timeframe: str) -> pd.DataFrame:
+    """Builds a one-row-per-symbol overview: price, trend, RSI, structure, signal."""
+    rows: list[dict] = []
+    for symbol in symbols:
+        try:
+            candles = _load_candles(symbol, timeframe, config.ALERT_CANDLES)
+            if candles.empty or len(candles) < 120:
+                continue
+            analysis = report_generator.run_analysis(symbol, timeframe, candles)
+            signals = strategy.generate_signals(candles)
+            ticker = _load_ticker(symbol)
+            rows.append(
+                {
+                    "Symbol": symbol,
+                    "Price": analysis["price"],
+                    "24h %": ticker.get("change_24h_pct", 0.0),
+                    "Trend": analysis["trend"]["trend"],
+                    "RSI": analysis["momentum"]["rsi"],
+                    "Structure": analysis["structure"]["structure"],
+                    "Risk": analysis["risk"]["level"],
+                    "Latest signal": _latest_signal_label(signals),
+                }
+            )
+        except Exception as error:  # one bad symbol must not break the scan
+            logging.warning("Scan failed for %s: %s", symbol, error)
+    return pd.DataFrame(rows)
+
+
 @st.cache_data(ttl=3600, show_spinner="Loading symbol list…")
 def _load_symbol_list() -> list[str]:
     """Loads every active */USDT spot symbol for the dynamic symbol picker."""
@@ -103,6 +151,23 @@ def _load_symbol_list() -> list[str]:
     except Exception as error:
         logging.warning("Symbol list fetch failed: %s — using defaults", error)
         return config.SYMBOL_CHOICES
+
+
+# ======================================================
+# TIME HELPERS
+# ======================================================
+def _localize_index(frame: pd.DataFrame, tz_name: str | None) -> pd.DataFrame:
+    """Returns a copy of `frame` with its UTC index converted to tz_name (or UTC)."""
+    localized = frame.copy()
+    localized.index = localized.index.tz_convert(tz_name or "UTC")
+    return localized
+
+
+def _now_label(tz_name: str | None) -> str:
+    """Current time as a display string in tz_name (or UTC), with a clear zone."""
+    zone = ZoneInfo(tz_name) if tz_name else ZoneInfo("UTC")
+    friendly = tz_name.split("/")[-1] if tz_name else "UTC"  # e.g. "Manila"
+    return datetime.now(zone).strftime("%Y-%m-%d %H:%M:%S") + f" {friendly}"
 
 
 # ======================================================
@@ -306,20 +371,34 @@ def _style_chart(figure: go.Figure, symbol: str, timeframe: str) -> None:
     figure.update_yaxes(title_text="MACD", title_font_size=11, row=4, col=1)
 
 
-def _build_chart(analysis: dict, signals: pd.DataFrame | None, show_fib: bool) -> go.Figure:
-    """Assembles the full price/volume/RSI/MACD chart from an analysis dict."""
-    candles = analysis["candles"].tail(config.CHART_CANDLES)
+def _build_chart(
+    analysis: dict,
+    signals: pd.DataFrame | None,
+    show_fib: bool,
+    chart_bars: int,
+    tz_name: str | None,
+) -> go.Figure:
+    """
+    Assembles the full price/volume/RSI/MACD chart from an analysis dict.
+    `chart_bars` — how many most-recent candles to render (drives zoom range).
+    `tz_name` — display timezone for the x-axis (None = UTC).
+    """
+    candles = _localize_index(analysis["candles"].tail(chart_bars), tz_name)
+    trend_series = _localize_index(analysis["trend"]["series"].tail(chart_bars), tz_name)
+    momentum_series = _localize_index(analysis["momentum"]["series"].tail(chart_bars), tz_name)
+
     figure = make_subplots(
         rows=4, cols=1, shared_xaxes=True,
         row_heights=[0.55, 0.13, 0.16, 0.16], vertical_spacing=0.02,
     )
     _add_candles_and_volume(figure, candles)
-    _add_emas(figure, analysis["trend"]["series"].tail(config.CHART_CANDLES))
+    _add_emas(figure, trend_series)
     _add_volume_profile(figure, analysis["volume_profile"], candles)
     _add_levels(figure, analysis, show_fib)
-    _add_momentum_panels(figure, analysis["momentum"]["series"].tail(config.CHART_CANDLES))
+    _add_momentum_panels(figure, momentum_series)
     if signals is not None:
-        _add_signal_markers(figure, candles, signals)
+        localized_signals = _localize_index(signals, tz_name)
+        _add_signal_markers(figure, candles, localized_signals)
     _style_chart(figure, analysis["symbol"], analysis["timeframe"])
     return figure
 
@@ -348,8 +427,8 @@ def _build_equity_chart(equity_curve: pd.Series) -> go.Figure:
 # ======================================================
 # PAGE SECTIONS
 # ======================================================
-def _render_sidebar() -> tuple[str, str, int, bool, bool]:
-    """Renders sidebar controls; returns (symbol, timeframe, candles, fib, markers)."""
+def _render_sidebar() -> dict:
+    """Renders sidebar controls; returns a settings dict."""
     st.sidebar.title("⚙️ Settings")
 
     use_full_list = st.sidebar.toggle("Load all exchange symbols", value=False)
@@ -363,11 +442,24 @@ def _render_sidebar() -> tuple[str, str, int, bool, bool]:
         index=config.TIMEFRAMES.index(config.DEFAULT_TIMEFRAME),
     )
     candle_count = st.sidebar.slider(
-        "History (candles)", min_value=300, max_value=3000,
-        value=config.HISTORY_CANDLES, step=100,
+        "Candles shown", min_value=200, max_value=config.CHART_MAX_CANDLES,
+        value=config.CHART_CANDLES, step=100,
+        help="How many candles to load and display. On the 1h timeframe, "
+             "720 candles ≈ 1 month.",
     )
+
     show_fib = st.sidebar.toggle("Fibonacci levels", value=False)
     show_markers = st.sidebar.toggle("Buy/sell markers", value=True)
+
+    st.sidebar.divider()
+    use_local_tz = st.sidebar.toggle(
+        f"Local time ({config.LOCAL_TZ.split('/')[-1]}, UTC+8)", value=False,
+        help="Chart times are UTC by default; toggle to show your local time.",
+    )
+    live_label = st.sidebar.selectbox(
+        "🔴 Live auto-refresh", list(config.LIVE_REFRESH_CHOICES.keys()), index=0,
+        help="Auto-refetch and redraw the Chart view on this interval.",
+    )
 
     if st.sidebar.button("🔄 Refresh data", width="stretch"):
         st.cache_data.clear()
@@ -377,7 +469,15 @@ def _render_sidebar() -> tuple[str, str, int, bool, bool]:
         "Data: public Binance market data via CCXT. "
         "Analysis describes probabilities, not predictions."
     )
-    return symbol, timeframe, candle_count, show_fib, show_markers
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "candle_count": candle_count,
+        "show_fib": show_fib,
+        "show_markers": show_markers,
+        "tz_name": config.LOCAL_TZ if use_local_tz else None,
+        "live_interval": config.LIVE_REFRESH_CHOICES[live_label],
+    }
 
 
 def _render_header(symbol: str, analysis: dict) -> None:
@@ -433,6 +533,48 @@ def _render_confluence_tab(symbol: str) -> None:
     )
     st.dataframe(
         table.style.format({"RSI": "{:.0f}"}), width="stretch", hide_index=True
+    )
+
+
+def _render_scan_view(settings: dict) -> None:
+    """Watchlist scan: one row per quick-pick symbol with signal + condition."""
+    st.caption(
+        f"All quick-pick symbols on the {settings['timeframe']} timeframe — "
+        "current condition and most recent strategy signal. Cached ~5 min."
+    )
+    scan = _scan_watchlist(tuple(config.SYMBOL_CHOICES), settings["timeframe"])
+    if scan.empty:
+        st.error("Scan returned no data — see logs/automation.log.")
+        return
+    st.dataframe(
+        scan.style.format({"Price": "{:,.4f}", "24h %": "{:+.2f}%", "RSI": "{:.0f}"}),
+        width="stretch", hide_index=True,
+    )
+
+
+def _render_signals_view(settings: dict) -> None:
+    """Signal history: the log of every buy/sell signal the strategy has flagged."""
+    st.caption(
+        "Every fresh buy/sell signal recorded by CLI runs (`main.py`) and "
+        "scheduled alert checks (`main.py --alerts`). Newest first."
+    )
+    history = signal_log.load_history(limit=200)
+    if history.empty:
+        st.info(
+            "No signals logged yet. Run `python main.py` or `python main.py "
+            "--alerts` to start building the history."
+        )
+        return
+
+    display = history[["datetime_utc", "symbol", "timeframe", "side", "price", "rsi"]].copy()
+    display["datetime_utc"] = display["datetime_utc"].dt.tz_convert(
+        settings["tz_name"] or "UTC"
+    )
+    zone = settings["tz_name"] or "UTC"
+    display = display.rename(columns={"datetime_utc": f"time ({zone})"})
+    st.dataframe(
+        display.style.format({"price": "{:,.4f}", "rsi": "{:.0f}"}),
+        width="stretch", hide_index=True,
     )
 
 
@@ -516,6 +658,57 @@ def _render_backtest_tab(candles: pd.DataFrame) -> None:
         st.info("Adjust the rules, then run a single backtest or sweep the RSI grid.")
 
 
+def _draw_chart(analysis: dict, settings: dict) -> None:
+    """Draws the chart + timezone caption for the given analysis."""
+    signals = (
+        strategy.generate_signals(analysis["candles"])
+        if settings["show_markers"] else None
+    )
+    st.plotly_chart(
+        _build_chart(
+            analysis, signals, settings["show_fib"],
+            settings["candle_count"], settings["tz_name"],
+        ),
+        width="stretch",
+        config={"displayModeBar": True, "scrollZoom": True},
+    )
+    zone = settings["tz_name"] or "UTC"
+    st.caption(
+        f"Times shown in **{zone}**. Double-click the chart to reset zoom · "
+        f"drag to zoom, scroll to zoom in/out."
+    )
+
+
+def _render_chart_view(settings: dict, static_analysis: dict) -> None:
+    """
+    Renders the Chart view. When live auto-refresh is on, wraps the draw in a
+    fragment that re-fetches fresh candles on the chosen interval; otherwise
+    draws once from the already-loaded analysis.
+    """
+    interval = settings["live_interval"]
+
+    if interval is None:
+        _draw_chart(static_analysis, settings)
+        return
+
+    @st.fragment(run_every=interval)
+    def _live_chart() -> None:
+        candles = exchange.fetch_candles(
+            settings["symbol"], settings["timeframe"], settings["candle_count"]
+        )
+        if candles.empty or len(candles) < 50:
+            st.warning("Live fetch returned no data — retrying next interval.")
+            return
+        database.save_candles(settings["symbol"], settings["timeframe"], candles)
+        analysis = report_generator.run_analysis(
+            settings["symbol"], settings["timeframe"], candles
+        )
+        st.caption(f"🔴 Live · updated {_now_label(settings['tz_name'])}")
+        _draw_chart(analysis, settings)
+
+    _live_chart()
+
+
 # ======================================================
 # MAIN PAGE
 # ======================================================
@@ -524,9 +717,10 @@ def main() -> None:
     st.set_page_config(page_title=config.DASHBOARD_TITLE, page_icon="📈", layout="wide")
     st.title(f"📈 {config.DASHBOARD_TITLE}")
 
-    symbol, timeframe, candle_count, show_fib, show_markers = _render_sidebar()
+    settings = _render_sidebar()
+    symbol, timeframe = settings["symbol"], settings["timeframe"]
 
-    candles = _load_candles(symbol, timeframe, candle_count)
+    candles = _load_candles(symbol, timeframe, settings["candle_count"])
     if candles.empty or len(candles) < 50:
         st.error(
             "Could not load enough candle data. Check your internet connection "
@@ -539,25 +733,27 @@ def main() -> None:
 
     # segmented_control instead of st.tabs: tabs reset to the first tab on
     # every rerun, so Strategy Lab results would render into a hidden panel.
-    views = ["📊 Chart", "🔭 Confluence", "📋 Market Report", "🧪 Strategy Lab"]
+    views = [
+        "📊 Chart", "🔎 Scan", "🔭 Confluence",
+        "📋 Market Report", "🧪 Strategy Lab", "📜 Signals",
+    ]
     active_view = st.segmented_control(
         "View", views, default=views[0], key="active_view",
         label_visibility="collapsed",
     )
 
     if active_view == "📊 Chart":
-        signals = strategy.generate_signals(candles) if show_markers else None
-        st.plotly_chart(
-            _build_chart(analysis, signals, show_fib),
-            width="stretch",
-            config={"displayModeBar": True, "scrollZoom": True},
-        )
+        _render_chart_view(settings, analysis)
+    elif active_view == "🔎 Scan":
+        _render_scan_view(settings)
     elif active_view == "🔭 Confluence":
         _render_confluence_tab(symbol)
     elif active_view == "📋 Market Report":
         _render_report_tab(analysis)
     elif active_view == "🧪 Strategy Lab":
         _render_backtest_tab(candles)
+    elif active_view == "📜 Signals":
+        _render_signals_view(settings)
 
 
 main()

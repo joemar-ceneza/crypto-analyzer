@@ -8,7 +8,11 @@ resistance, EMAs/ADX, RSI/MACD/Stoch RSI, ATR/Bollinger, RSI divergence,
 market structure (HH/HL/LH/LL, BOS, CHOCH) — and presents:
 
 - a TradingView-style interactive chart (candles, volume, EMAs, levels,
-  fibonacci, buy/sell markers, RSI and MACD subpanels)
+  fibonacci, buy/sell markers, RSI and MACD subpanels) with a candle-count
+  slider, optional local-time (Manila/UTC+8) axis, and a live auto-refresh
+  mode
+- a **watchlist scan**: every quick-pick symbol in one table with price,
+  trend, RSI, structure, risk, and its most recent signal
 - multi-timeframe confluence: the same analysis on 1h/4h/1d with an
   alignment verdict and score
 - an automated markdown market report with scenarios and risk assessment
@@ -16,6 +20,8 @@ market structure (HH/HL/LH/LL, BOS, CHOCH) — and presents:
   never claims to predict price)
 - a strategy lab: VectorBT backtester with tunable rules and an RSI
   parameter sweep (win rate, drawdown, Sharpe, equity curve)
+- a **signal history** log of every buy/sell signal the strategy has flagged
+- **Telegram alerts** on new buy/sell signals (see below)
 - scheduled data collection (`--collect`) that grows the SQLite candle
   history over time via Windows Task Scheduler
 
@@ -83,10 +89,12 @@ Scheduler job at your venv's full `python.exe` path with `main.py --collect`
 as arguments and this folder as the working directory (e.g. hourly), and
 the candle history grows on its own.
 
-## Telegram sell-signal alerts
-Get a Telegram message when a **new sell signal** fires (RSI > 70 or price
-reaches the trailing VAH — the same rule as the chart's sell markers) on the
-symbols in `config.ALERT_SYMBOLS`.
+## Telegram signal alerts
+Get a Telegram message when a **new buy or sell signal** fires (the same rules
+as the chart's markers) on the symbols in `config.ALERT_SYMBOLS`. Each message
+includes a "why now" context line (trend, structure, RSI, risk). Buy/sell can
+be toggled independently (`ALERT_ON_BUY` / `ALERT_ON_SELL`) and a per-symbol
+cooldown (`ALERT_COOLDOWN_BARS`) prevents spam.
 
 **One-time setup (~2 minutes):**
 1. In Telegram, message **@BotFather**, send `/newbot`, follow the prompts,
@@ -138,7 +146,8 @@ crypto-analyzer/
 ├── data/
 │   ├── exchange.py             # CCXT/Binance candles, tickers, symbol list
 │   ├── database.py             # SQLite candle store (PostgreSQL-swappable)
-│   └── collector.py            # incremental collection for Task Scheduler
+│   ├── collector.py            # incremental collection for Task Scheduler
+│   └── signal_log.py           # buy/sell signal history (CSV)
 ├── indicators/
 │   ├── volume_profile.py       # POC, VAH, VAL, HVN, LVN
 │   ├── support_resistance.py   # swings, pivots, fibonacci, clustered S/R
@@ -153,7 +162,7 @@ crypto-analyzer/
 │   └── strategy.py             # tunable rules + VectorBT + parameter sweep
 ├── alerts/
 │   ├── notifier.py             # Telegram sender (credentials from .env)
-│   └── signal_watcher.py       # new sell-signal detection + dedup state
+│   └── signal_watcher.py       # new buy/sell detection + dedup + cooldown
 ├── ai/
 │   └── analyzer.py             # rule-based narrative (no API key needed)
 ├── dashboard/

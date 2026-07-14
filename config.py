@@ -137,16 +137,25 @@ COLLECT_TIMEFRAMES = TIMEFRAMES   # timeframes kept warm per symbol
 # ======================================================
 # Credentials live in .env, never here:
 #   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-ALERT_SYMBOLS = ["ETH/USDT", "BTC/USDT"]  # symbols watched for sell signals
+ALERT_SYMBOLS = ["ETH/USDT", "BTC/USDT"]  # symbols watched for signals
 ALERT_TIMEFRAME = "1h"                     # timeframe the alert rule runs on
 ALERT_CANDLES = 600                        # candles fetched per alert check
 ALERT_RECENT_BARS = 3                      # only alert if the signal fired within
                                            # this many latest closed candles
+ALERT_ON_SELL = True                       # notify on new sell signals
+ALERT_ON_BUY = True                        # notify on new buy signals
+ALERT_COOLDOWN_BARS = 6                    # min candles between alerts of the
+                                           # same symbol + side (anti-spam)
 ALERT_STATE_FILE = os.path.join(OUTPUT_DIR, "alert_state.json")
+SIGNAL_LOG_FILE = os.path.join(OUTPUT_DIR, "signal_history.csv")
 
 # ======================================================
 # DASHBOARD
 # ======================================================
 DASHBOARD_TITLE = "Crypto Market Intelligence"
-CHART_CANDLES = 300              # candles rendered on the chart
-AUTO_REFRESH_SECONDS = 60        # dashboard data refresh interval
+CHART_CANDLES = 1000             # default candles shown on the chart (slider value)
+CHART_MAX_CANDLES = 5000         # upper bound of the chart history slider
+AUTO_REFRESH_SECONDS = 60        # cache lifetime for fetched candles
+LOCAL_TZ = "Asia/Manila"         # UTC+8 — used by the "local time" display toggle
+# Live auto-refresh choices (label -> seconds; None = off)
+LIVE_REFRESH_CHOICES = {"Off": None, "10s": 10, "30s": 30, "60s": 60}

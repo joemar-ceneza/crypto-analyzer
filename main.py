@@ -162,19 +162,28 @@ def main() -> None:
     logging.info("=" * 70)
     confluence_result = _run_confluence_safely(arguments.symbol)
 
-    # Step 6: Render and save the market report
+    # Step 6: Log any fresh buy/sell signals to the signal history
     logging.info("=" * 70)
-    logging.info("STEP 6 — Rendering market report")
+    logging.info("STEP 6 — Logging strategy signals")
+    logging.info("=" * 70)
+    from backtesting import strategy
+    from data import signal_log
+
+    signal_log.log_signals(
+        arguments.symbol, arguments.timeframe, strategy.generate_signals(candles)
+    )
+
+    # Step 7: Render and save the market report
+    logging.info("=" * 70)
+    logging.info("STEP 7 — Rendering market report")
     logging.info("=" * 70)
     report_generator.generate_report(analysis, narrative, confluence_result)
 
-    # Step 7 (optional): Run the strategy backtest
+    # Step 8 (optional): Run the strategy backtest
     if arguments.backtest:
         logging.info("=" * 70)
-        logging.info("STEP 7 — Running strategy backtest")
+        logging.info("STEP 8 — Running strategy backtest")
         logging.info("=" * 70)
-        from backtesting import strategy  # heavy import — only when requested
-
         result = strategy.run_backtest(candles)
         for name, value in result["stats"].items():
             logging.info("  %s: %s", name, value)

@@ -116,6 +116,7 @@ def _build_signals(inputs: dict, rules: dict) -> pd.DataFrame:
         {
             "entries": entries.fillna(False),
             "exits": exits.fillna(False),
+            "close": close,
             "val": value_area["val"],
             "vah": value_area["vah"],
             "rsi": rsi,
