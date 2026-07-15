@@ -27,6 +27,7 @@ from plotly.subplots import make_subplots
 
 import config
 import settings_store
+import strategies
 import utils
 from ai import analyzer
 from analysis import calibration, confluence, report_generator, scorecard, signal_quality
@@ -674,7 +675,9 @@ def _render_signals_view(settings: dict) -> None:
         )
         return
 
-    display = history[["datetime_utc", "symbol", "timeframe", "side", "price", "rsi"]].copy()
+    display = history[
+        ["datetime_utc", "symbol", "timeframe", "strategy", "side", "price", "rsi"]
+    ].copy()
     display["datetime_utc"] = display["datetime_utc"].dt.tz_convert(
         settings["tz_name"] or "UTC"
     )
@@ -824,6 +827,24 @@ def _render_settings_view() -> None:
     )
 
     with st.form("settings_form"):
+        st.markdown("##### Active strategy")
+        specs = strategies.all_specs()
+        labels = {spec.label: spec.name for spec in specs}
+        current = settings_store.get("ACTIVE_STRATEGY")
+        current_label = strategies.spec(current).label
+        chosen_label = st.selectbox(
+            "Strategy used by chart markers, alerts and backtests",
+            list(labels), index=list(labels).index(current_label),
+        )
+        chosen_strategy = labels[chosen_label]
+        chosen_spec = strategies.spec(chosen_strategy)
+        st.caption(
+            f"{chosen_spec.description}  \n"
+            f"**Entry:** {chosen_spec.entry_rule}  \n"
+            f"**Exit:** {chosen_spec.exit_rule}  \n"
+            f"**Suited to:** {', '.join(chosen_spec.suitable_regimes)} markets"
+        )
+
         st.markdown("##### Alerts")
         columns = st.columns(2)
         alert_symbols = columns[0].multiselect(
@@ -873,6 +894,7 @@ def _render_settings_view() -> None:
     if saved:
         settings_store.save_overrides(
             {
+                "ACTIVE_STRATEGY": chosen_strategy,
                 "ALERT_SYMBOLS": alert_symbols,
                 "ALERT_TIMEFRAMES": alert_timeframes,
                 "ALERT_ON_BUY": alert_on_buy,
@@ -899,21 +921,62 @@ def _render_settings_view() -> None:
             st.json(overrides)
 
 
-def _collect_rule_inputs() -> dict:
-    """Renders the strategy-lab rule controls; returns the rule dict."""
-    columns = st.columns(4)
-    rsi_buy = columns[0].slider("BUY when RSI below", 10, 50,
-                                config.BACKTEST_RSI_BUY, step=5)
-    rsi_sell = columns[1].slider("SELL when RSI above", 50, 90,
-                                 config.BACKTEST_RSI_SELL, step=5)
-    use_val = columns[2].toggle("BUY only below trailing VAL",
-                                value=config.BACKTEST_USE_VAL_FILTER)
-    use_vah = columns[3].toggle("SELL at trailing VAH",
-                                value=config.BACKTEST_USE_VAH_TARGET)
-    return {
-        "rsi_buy": rsi_buy, "rsi_sell": rsi_sell,
-        "use_val_filter": use_val, "use_vah_target": use_vah,
-    }
+def _render_regime_fit_notice(analysis: dict, strategy_name: str) -> None:
+    """
+    Warns when the chosen strategy is built for a different regime than the one
+    the market is actually in — the single most common way these rules lose money.
+    """
+    spec = strategies.spec(strategy_name)
+    current = analysis["regime"]["regime"]
+    if spec.suits(current):
+        st.success(
+            f"**{spec.label}** suits the current **{current}** regime — "
+            f"{analysis['regime']['label']}."
+        )
+        return
+
+    better = [other.label for other in strategies.suited_to(current)]
+    suggestion = f" Suited to it: **{', '.join(better)}**." if better else ""
+    st.warning(
+        f"⚠️ **{spec.label}** is built for "
+        f"**{'/'.join(spec.suitable_regimes)}** markets, but the regime right now "
+        f"is **{current}** ({analysis['regime']['label']}).{suggestion} "
+        f"Signals from it will score low confidence, and rightly so."
+    )
+
+
+def _collect_rule_inputs(strategy_name: str) -> dict:
+    """
+    Renders rule controls for the chosen strategy — only the knobs that strategy
+    actually declares, so nothing on screen is a no-op.
+    """
+    defaults = strategy.default_rules(strategy_name)
+    rules: dict = {}
+    tunable = [key for key in defaults if key not in ("initial_cash", "fees")]
+    if not tunable:
+        st.caption("This strategy has no tunable rules.")
+        return rules
+
+    columns = st.columns(min(len(tunable), 4))
+    for index, key in enumerate(tunable):
+        column = columns[index % len(columns)]
+        value = defaults[key]
+        if isinstance(value, bool):
+            rules[key] = column.toggle(key.replace("_", " "), value=value)
+        elif key == "rsi_buy":
+            rules[key] = column.slider("BUY when RSI below", 10, 50, int(value), step=5)
+        elif key == "rsi_sell":
+            rules[key] = column.slider("SELL when RSI above", 50, 90, int(value), step=5)
+        elif isinstance(value, int):
+            rules[key] = column.number_input(
+                key.replace("_", " "), min_value=1, max_value=200, value=int(value)
+            )
+        elif isinstance(value, float):
+            rules[key] = column.number_input(
+                key.replace("_", " "), min_value=0.0, max_value=10.0,
+                value=float(value), step=0.1, format="%.2f",
+            )
+    return rules
 
 
 def _render_backtest_results(result: dict) -> None:
@@ -939,11 +1002,9 @@ def _render_walk_forward_results(result: dict) -> None:
     if result["total_oos_trades"] == 0:
         st.warning(
             "**No trades fired out-of-sample — there is nothing to measure.** "
-            "This is not a 0% result: the rules simply never triggered. The BUY "
-            "rule needs price below VAL *and* a low RSI *and* a MACD crossover on "
-            "the same candle, which is very rare. Loosen it in **Settings** "
-            "(raise the RSI threshold, or turn off the VAL filter), or load more "
-            "history, then try again."
+            "This is not a 0% result: the rules simply never triggered. Loosen "
+            "them above (or in **Settings**), try a strategy whose entry is less "
+            "restrictive, or load more history — then run this again."
         )
         st.dataframe(result["folds"], width="stretch", hide_index=True)
         return
@@ -971,10 +1032,70 @@ def _render_walk_forward_results(result: dict) -> None:
     )
 
 
+def _render_strategy_comparison(candles: pd.DataFrame) -> None:
+    """Runs every strategy over the same candles, with the caveats stated."""
+    with st.spinner("Running every strategy over the same data…"):
+        frame = strategy.compare_strategies(candles)
+
+    st.dataframe(
+        frame[[
+            "label", "suits", "entries", "total_trades", "win_rate_pct",
+            "total_return_pct", "max_drawdown_pct", "sharpe_ratio",
+        ]].style.format(
+            {
+                "win_rate_pct": "{:.1f}%", "total_return_pct": "{:+.2f}%",
+                "max_drawdown_pct": "{:.2f}%", "sharpe_ratio": "{:.2f}",
+            }
+        ),
+        width="stretch", hide_index=True,
+    )
+    st.caption(
+        "**This ranks nothing.** It is one window on one symbol — a single "
+        "sample, like any one-off backtest. And `suits` lists the regimes a "
+        "strategy is *designed* for, while this window almost certainly spans "
+        "several regimes, so a suited strategy is not 'supposed to' win over all "
+        "of it. Use this to spot strategies that never fire, and to see how "
+        "differently the same market treats each approach — then confirm "
+        "anything interesting with **Walk-forward**."
+    )
+    zero = frame[frame["entries"] == 0]
+    if not zero.empty:
+        st.warning(
+            f"Never fired on this data: **{', '.join(zero['label'])}** — a "
+            f"strategy that produces no entries cannot be evaluated at all."
+        )
+
+
 def _render_backtest_tab(candles: pd.DataFrame, settings: dict) -> None:
-    """Strategy lab: tunable rules, backtest, sweep, and walk-forward validation."""
+    """Strategy lab: pick a strategy, tune it, backtest, sweep, validate, compare."""
     st.markdown("#### Strategy lab")
-    rules = _collect_rule_inputs()
+
+    specs = strategies.all_specs()
+    labels = {spec.label: spec.name for spec in specs}
+    active = strategy.active_strategy_name()
+    active_label = strategies.spec(active).label
+    chosen_label = st.selectbox(
+        "Strategy", list(labels), index=list(labels).index(active_label),
+        help="Try any strategy here without changing your saved default. "
+             "Set the default in ⚙️ Settings.",
+    )
+    strategy_name = labels[chosen_label]
+    spec = strategies.spec(strategy_name)
+
+    st.caption(
+        f"**{spec.description}**  \n"
+        f"**Entry:** {spec.entry_rule}  \n"
+        f"**Exit:** {spec.exit_rule}  \n"
+        f"**Suited to:** {', '.join(spec.suitable_regimes)}"
+    )
+    if strategy_name != active:
+        st.info(
+            f"Testing **{spec.label}**, but your saved default is "
+            f"**{active_label}** — alerts and chart markers still use the default."
+        )
+    _render_regime_fit_notice(settings["analysis"], strategy_name)
+
+    rules = _collect_rule_inputs(strategy_name)
 
     use_full_history = st.toggle(
         "Use full stored history (from the local database)", value=False,
@@ -996,38 +1117,40 @@ def _render_backtest_tab(candles: pd.DataFrame, settings: dict) -> None:
                 "to grow the history."
             )
 
-    st.caption(
-        f"BUY: RSI < {rules['rsi_buy']} + MACD bullish crossover"
-        + (" + price below trailing VAL" if rules["use_val_filter"] else "")
-        + f" · SELL: RSI > {rules['rsi_sell']}"
-        + (" or price reaches trailing VAH" if rules["use_vah_target"] else "")
-        + " · First run compiles Numba — allow ~1 min."
-    )
+    st.caption("First backtest compiles Numba — allow ~1 min.")
 
-    button_columns = st.columns([1, 1, 1, 2])
+    button_columns = st.columns([1, 1, 1, 1, 1])
     run_single = button_columns[0].button("▶ Run backtest", type="primary")
     run_sweep = button_columns[1].button("🧮 Parameter sweep")
     run_walk = button_columns[2].button("🔬 Walk-forward")
+    run_compare = button_columns[3].button("⚖️ Compare all")
+
+    if run_compare:
+        _render_strategy_comparison(test_candles)
+        return
 
     if run_walk:
         with st.spinner("Walk-forward validation (optimizing each fold)…"):
             try:
-                _render_walk_forward_results(strategy.run_walk_forward(test_candles))
+                _render_walk_forward_results(
+                    strategy.run_walk_forward(test_candles, strategy_name=strategy_name)
+                )
             except ValueError as error:
                 st.error(str(error))
         return
 
     if run_single:
         with st.spinner("Backtesting…"):
-            _render_backtest_results(strategy.run_backtest(test_candles, rules))
+            _render_backtest_results(
+                strategy.run_backtest(test_candles, rules, strategy_name)
+            )
     elif run_sweep:
-        with st.spinner(
-            f"Sweeping {len(config.SWEEP_RSI_BUY) * len(config.SWEEP_RSI_SELL)} "
-            "rule combinations…"
-        ):
-            sweep = strategy.run_parameter_sweep(test_candles, base_rules=rules)
+        with st.spinner("Sweeping rule combinations…"):
+            sweep = strategy.run_parameter_sweep(
+                test_candles, base_rules=rules, strategy_name=strategy_name
+            )
         st.markdown("**Combinations ranked by total return** — same data, "
-                    "same VAL/VAH filters, only the RSI thresholds vary.")
+                    "same strategy, only the RSI thresholds vary.")
         st.dataframe(
             sweep.style.format(
                 {
@@ -1043,7 +1166,11 @@ def _render_backtest_tab(candles: pd.DataFrame, settings: dict) -> None:
             "hypothesis to re-test on other symbols and periods, not a result."
         )
     else:
-        st.info("Adjust the rules, then run a single backtest or sweep the RSI grid.")
+        st.info(
+            "Adjust the rules, then backtest one strategy, sweep its RSI grid, "
+            "validate it out-of-sample with **Walk-forward**, or run "
+            "**Compare all** to see every strategy on this same data."
+        )
 
 
 def _draw_chart(analysis: dict, settings: dict) -> None:
@@ -1142,7 +1269,7 @@ def main() -> None:
     elif active_view == "📋 Market Report":
         _render_report_tab(analysis)
     elif active_view == "🧪 Strategy Lab":
-        _render_backtest_tab(candles, settings)
+        _render_backtest_tab(candles, {**settings, "analysis": analysis})
     elif active_view == "📜 Signals":
         _render_signals_view(settings)
     elif active_view == "🎯 Scorecard":

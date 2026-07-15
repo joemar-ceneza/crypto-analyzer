@@ -159,6 +159,24 @@ RISK_HIGH_ATR_PCT = 0.04         # ATR > 4% of price => high volatility risk
 RISK_LOW_ATR_PCT = 0.015         # ATR < 1.5% of price => low volatility risk
 
 # ======================================================
+# STRATEGIES (interchangeable — see strategies/)
+# ======================================================
+# The strategy used by the chart markers, alerts and backtests. Every strategy
+# declares the regimes it suits; running one outside them lowers signal
+# confidence and is called out in the UI.
+#   mean_reversion | trend_following | breakout | pullback | range_trading
+ACTIVE_STRATEGY = "mean_reversion"
+
+# --- breakout ---
+BREAKOUT_LOOKBACK = 20           # bars in the entry channel (prior highs)
+BREAKOUT_EXIT_LOOKBACK = 10      # bars in the exit channel (prior lows)
+BREAKOUT_VOLUME_MULT = 1.5       # volume must exceed this x its trailing median
+
+# --- pullback ---
+PULLBACK_TOLERANCE_PCT = 0.01    # how close to the EMA counts as "pulled back"
+PULLBACK_RSI_RESET = 50          # RSI must have dipped to/below this, then turn up
+
+# ======================================================
 # BACKTESTING (default strategy rules)
 # ======================================================
 BACKTEST_INITIAL_CASH = 10000.0

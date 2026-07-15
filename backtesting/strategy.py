@@ -1,149 +1,129 @@
 """
-Strategy backtesting with VectorBT.
+Strategy execution and validation with VectorBT.
 
-Default rule set (defaults in config.py, every value overridable per run):
-    BUY  when: price below trailing VAL  AND  RSI below rsi_buy  AND  MACD bullish crossover
-    SELL when: price reaches trailing VAH  OR  RSI above rsi_sell
+This module runs strategies; it does not define them. The rules live in
+`strategies/` — one module each, interchangeable, every one declaring the market
+regimes it suits. Which one runs is `settings_store.get("ACTIVE_STRATEGY")`.
 
-Honesty note: VAL/VAH are recomputed from a TRAILING window at each step
-(no look-ahead) — using the final chart profile would leak future data
-into historical signals.
+Honesty note: every input is TRAILING — the value area is rebuilt from a
+trailing window and channel highs/lows are shifted. Using the finished chart's
+profile would leak the future into the past and make any backtest look brilliant
+and worthless.
 
 Public API:
-    default_rules()                     -> dict of the config-default rule set
-    generate_signals(candles, rules)    -> DataFrame with entries/exits/val/vah/rsi
-    run_backtest(candles, rules)        -> dict with stats, equity curve, trades, signals
-    run_parameter_sweep(candles, ...)   -> DataFrame ranking rule combinations
+    active_strategy_name()                     -> the strategy currently selected
+    default_rules(strategy_name)               -> that strategy's tunable defaults
+    generate_signals(candles, rules, strategy) -> DataFrame of entries/exits + context
+    run_backtest(candles, rules, strategy)     -> stats, equity curve, trades, signals
+    run_parameter_sweep(candles, ...)          -> DataFrame ranking rule combinations
+    run_walk_forward(candles, ...)             -> out-of-sample validation per fold
+    compare_strategies(candles, ...)           -> every strategy on the same data
 """
 
 import logging
 
-import numpy as np
 import pandas as pd
 
 import config
-from indicators import momentum, volume_profile
+import strategies
+from strategies import inputs as strategy_inputs
 
-# Recompute the trailing volume profile every N bars — a profile shifts
-# slowly, and recomputing per-bar adds cost without changing signals much.
-_PROFILE_RECALC_EVERY = 10
+# Rule keys the dashboard's shared controls own. They are only applied to a
+# strategy that actually declares them, so a knob can never leak into a strategy
+# that has no concept of it.
+_SHARED_RULE_SETTINGS = {
+    "rsi_buy": "BACKTEST_RSI_BUY",
+    "rsi_sell": "BACKTEST_RSI_SELL",
+    "use_val_filter": "BACKTEST_USE_VAL_FILTER",
+    "use_vah_target": "BACKTEST_USE_VAH_TARGET",
+}
 
 
 # ======================================================
-# RULE SET
+# STRATEGY SELECTION & RULES
 # ======================================================
-def default_rules() -> dict:
-    """
-    Returns the default strategy rules as an overridable dict. Values come from
-    the settings store, so rules saved from the dashboard are picked up by the
-    chart, the alerts, and the CLI alike.
-    """
+def active_strategy_name() -> str:
+    """The strategy currently selected (settings override, else config default)."""
     import settings_store  # local import — keeps this module importable standalone
 
-    return {
-        "rsi_buy": settings_store.get("BACKTEST_RSI_BUY"),
-        "rsi_sell": settings_store.get("BACKTEST_RSI_SELL"),
-        "use_val_filter": settings_store.get("BACKTEST_USE_VAL_FILTER"),
-        "use_vah_target": settings_store.get("BACKTEST_USE_VAH_TARGET"),
-        "initial_cash": config.BACKTEST_INITIAL_CASH,
-        "fees": config.BACKTEST_FEES,
-    }
+    return settings_store.get("ACTIVE_STRATEGY")
 
 
-def _merge_rules(rules: dict | None) -> dict:
-    """Overlays user-supplied rules on the defaults."""
-    merged = default_rules()
+def _resolve(strategy_name: str | None) -> str:
+    """Falls back to the active strategy, and validates the name."""
+    name = strategy_name or active_strategy_name()
+    strategies.get(name)  # raises ValueError on an unknown name
+    return name
+
+
+def default_rules(strategy_name: str | None = None) -> dict:
+    """
+    A strategy's default rules: its own declared defaults, with the dashboard's
+    shared knobs applied where that strategy uses them.
+    """
+    import settings_store
+
+    name = _resolve(strategy_name)
+    rules = dict(strategies.spec(name).default_rules)
+    for rule_key, setting_key in _SHARED_RULE_SETTINGS.items():
+        if rule_key in rules:
+            rules[rule_key] = settings_store.get(setting_key)
+    rules["initial_cash"] = config.BACKTEST_INITIAL_CASH
+    rules["fees"] = config.BACKTEST_FEES
+    return rules
+
+
+def _merge_rules(rules: dict | None, strategy_name: str | None = None) -> dict:
+    """Overlays user-supplied rules on a strategy's defaults."""
+    merged = default_rules(strategy_name)
     if rules:
         merged.update(rules)
     return merged
 
 
 # ======================================================
-# TRAILING VALUE AREA
-# ======================================================
-def _trailing_value_area(candles: pd.DataFrame) -> pd.DataFrame:
-    """
-    Computes VAL/VAH per bar from a trailing VOLUME_PROFILE_LOOKBACK window,
-    refreshed every _PROFILE_RECALC_EVERY bars and forward-filled between
-    refreshes. Bars without enough history stay NaN (no signals there).
-    """
-    lookback = config.VOLUME_PROFILE_LOOKBACK
-    min_history = max(lookback // 5, 50)
-    val_values = np.full(len(candles), np.nan)
-    vah_values = np.full(len(candles), np.nan)
-
-    last_val = last_vah = np.nan
-    for i in range(min_history, len(candles)):
-        if (i - min_history) % _PROFILE_RECALC_EVERY == 0:
-            window = candles.iloc[max(0, i - lookback): i]
-            profile = volume_profile.run_volume_profile(window, log_result=False)
-            last_val, last_vah = profile["val"], profile["vah"]
-        val_values[i] = last_val
-        vah_values[i] = last_vah
-
-    return pd.DataFrame({"val": val_values, "vah": vah_values}, index=candles.index)
-
-
-# ======================================================
 # SIGNAL GENERATION
 # ======================================================
-def _compute_signal_inputs(candles: pd.DataFrame) -> dict:
+def _build_signals(inputs: dict, rules: dict, strategy_name: str) -> pd.DataFrame:
     """
-    Computes the rule inputs (RSI, MACD crossover, trailing value area) once
-    so a parameter sweep can rebuild signals cheaply for many rule combos.
+    Applies one strategy + rule set to precomputed inputs.
+
+    The returned frame carries the context columns (close/val/vah/rsi) every
+    strategy's signals are read alongside — the chart, the alerts and the signal
+    log all rely on them being present regardless of which strategy produced the
+    entries and exits.
     """
-    momentum_series = momentum.run_momentum_analysis(candles)["series"]
-    macd_line = momentum_series["macd"]
-    macd_signal = momentum_series["macd_signal"]
-    return {
-        "close": candles["close"],
-        "rsi": momentum_series["rsi"],
-        "macd_cross_up": (macd_line > macd_signal)
-        & (macd_line.shift(1) <= macd_signal.shift(1)),
-        "value_area": _trailing_value_area(candles),
-    }
-
-
-def _build_signals(inputs: dict, rules: dict) -> pd.DataFrame:
-    """Applies one rule set to precomputed inputs; returns the signal frame."""
-    close, rsi = inputs["close"], inputs["rsi"]
-    value_area = inputs["value_area"]
-
-    entries = (rsi < rules["rsi_buy"]) & inputs["macd_cross_up"]
-    if rules["use_val_filter"]:
-        entries &= close < value_area["val"]
-
-    exits = rsi > rules["rsi_sell"]
-    if rules["use_vah_target"]:
-        exits |= close >= value_area["vah"]
-    # No signals before history warms up (VAL/VAH NaN -> comparisons False)
-
+    entries, exits = strategies.get(strategy_name).generate(inputs, rules)
     return pd.DataFrame(
         {
-            "entries": entries.fillna(False),
-            "exits": exits.fillna(False),
-            "close": close,
-            "val": value_area["val"],
-            "vah": value_area["vah"],
-            "rsi": rsi,
+            "entries": entries.fillna(False).astype(bool),
+            "exits": exits.fillna(False).astype(bool),
+            "close": inputs["close"],
+            "val": inputs["val"],
+            "vah": inputs["vah"],
+            "rsi": inputs["rsi"],
             "macd_cross_up": inputs["macd_cross_up"].fillna(False),
         },
-        index=close.index,
+        index=inputs["close"].index,
     )
 
 
-def generate_signals(candles: pd.DataFrame, rules: dict | None = None) -> pd.DataFrame:
+def generate_signals(
+    candles: pd.DataFrame,
+    rules: dict | None = None,
+    strategy_name: str | None = None,
+) -> pd.DataFrame:
     """
-    Builds boolean entry/exit signal columns from the rule set (defaults
-    from config.py unless overridden). Also used by the dashboard to place
-    buy/sell markers on the chart.
+    Builds boolean entry/exit signals for a strategy (the active one unless
+    `strategy_name` says otherwise). Used by the chart markers, the alert
+    watcher, the signal log and the backtester alike.
     """
-    merged = _merge_rules(rules)
-    signals = _build_signals(_compute_signal_inputs(candles), merged)
+    name = _resolve(strategy_name)
+    merged = _merge_rules(rules, name)
+    signals = _build_signals(strategy_inputs.build_inputs(candles), merged, name)
     logging.info(
-        "Signals generated (RSI<%s / RSI>%s): %d entries, %d exit conditions",
-        merged["rsi_buy"], merged["rsi_sell"],
-        int(signals["entries"].sum()), int(signals["exits"].sum()),
+        "Signals generated [%s]: %d entries, %d exit conditions",
+        name, int(signals["entries"].sum()), int(signals["exits"].sum()),
     )
     return signals
 
@@ -189,10 +169,14 @@ def _extract_stats(portfolio) -> dict:
 # ======================================================
 # PUBLIC ENTRY POINTS
 # ======================================================
-def run_backtest(candles: pd.DataFrame, rules: dict | None = None) -> dict:
+def run_backtest(
+    candles: pd.DataFrame,
+    rules: dict | None = None,
+    strategy_name: str | None = None,
+) -> dict:
     """
-    Runs the strategy over a candle DataFrame with VectorBT.
-    `rules` overrides any subset of default_rules().
+    Runs a strategy over a candle DataFrame with VectorBT.
+    `rules` overrides any subset of default_rules(strategy_name).
 
     Returns a dict:
         stats: total_trades / win_rate_pct / total_return_pct /
@@ -201,12 +185,14 @@ def run_backtest(candles: pd.DataFrame, rules: dict | None = None) -> dict:
         trades: DataFrame of individual trades (entry/exit/pnl)
         signals: the signal DataFrame used (for chart markers)
         rules: the merged rule set that actually ran
+        strategy: the strategy name that ran
     """
     if len(candles) < 100:
         raise ValueError("Backtest needs at least 100 candles.")
 
-    merged = _merge_rules(rules)
-    signals = generate_signals(candles, merged)
+    name = _resolve(strategy_name)
+    merged = _merge_rules(rules, name)
+    signals = generate_signals(candles, merged, name)
     portfolio = _build_portfolio(candles["close"], signals, merged)
 
     stats = _extract_stats(portfolio)
@@ -221,7 +207,59 @@ def run_backtest(candles: pd.DataFrame, rules: dict | None = None) -> dict:
         "trades": portfolio.trades.records_readable,
         "signals": signals,
         "rules": merged,
+        "strategy": name,
     }
+
+
+def compare_strategies(
+    candles: pd.DataFrame, strategy_names: list[str] | None = None
+) -> pd.DataFrame:
+    """
+    Runs every strategy over the same candles and ranks them by return.
+
+    The point is not to crown a winner — it is to see how differently the same
+    market treats each approach, and to catch strategies that never fire at all.
+    Inputs are built once and shared, so this costs barely more than one run.
+
+    **Read the `suits` column carefully.** It lists the regimes a strategy is
+    designed for, but the window being tested almost certainly spans several
+    regimes. A regime-suited strategy is therefore not "supposed to" win over the
+    whole window, and one run on one symbol ranks nothing — it is a single
+    sample, exactly like a one-off backtest.
+
+    Returns a DataFrame: strategy, label, suits, entries, trades, win rate,
+    return, max drawdown, Sharpe.
+    """
+    if len(candles) < 100:
+        raise ValueError("Strategy comparison needs at least 100 candles.")
+
+    names = strategy_names or strategies.names()
+    shared_inputs = strategy_inputs.build_inputs(candles)  # computed once for all
+
+    rows: list[dict] = []
+    for name in names:
+        spec = strategies.spec(name)
+        rules = default_rules(name)
+        try:
+            signals = _build_signals(shared_inputs, rules, name)
+            portfolio = _build_portfolio(candles["close"], signals, rules)
+            stats = _extract_stats(portfolio)
+        except Exception as error:  # noqa: BLE001 — one bad strategy must not stop the rest
+            logging.warning("Strategy comparison failed for %s: %s", name, error)
+            continue
+        rows.append(
+            {
+                "strategy": name,
+                "label": spec.label,
+                "suits": ", ".join(spec.suitable_regimes),
+                "entries": int(signals["entries"].sum()),
+                **stats,
+            }
+        )
+
+    frame = pd.DataFrame(rows).sort_values("total_return_pct", ascending=False)
+    logging.info("Compared %d strategies over %d candles", len(frame), len(candles))
+    return frame.reset_index(drop=True)
 
 
 def run_walk_forward(
@@ -230,6 +268,7 @@ def run_walk_forward(
     train_pct: float | None = None,
     rsi_buy_values: list[int] | None = None,
     rsi_sell_values: list[int] | None = None,
+    strategy_name: str | None = None,
 ) -> dict:
     """
     Walk-forward validation — the honest counterpart to a parameter sweep.
@@ -245,6 +284,7 @@ def run_walk_forward(
         oos_return_pct / oos_win_rate_pct: averages across folds
         consistency_pct: share of folds whose out-of-sample return was positive
     """
+    name = _resolve(strategy_name)
     splits = splits or config.WALK_FORWARD_SPLITS
     train_pct = train_pct or config.WALK_FORWARD_TRAIN_PCT
     rsi_buy_values = rsi_buy_values or config.SWEEP_RSI_BUY
@@ -266,15 +306,21 @@ def run_walk_forward(
             continue
 
         # 1) Optimize on the in-sample part only
-        in_sample = run_parameter_sweep(train, rsi_buy_values, rsi_sell_values)
+        in_sample = run_parameter_sweep(
+            train, rsi_buy_values, rsi_sell_values, strategy_name=name
+        )
         if in_sample.empty:
             continue
         best = in_sample.iloc[0]
-        rules = {"rsi_buy": int(best["rsi_buy"]), "rsi_sell": int(best["rsi_sell"])}
+        rules = {
+            key: int(best[key])
+            for key in ("rsi_buy", "rsi_sell")
+            if best[key] != "—"  # a strategy that ignores RSI has nothing to carry over
+        }
 
         # 2) Apply the winner to the untouched out-of-sample part
         try:
-            out_of_sample = run_backtest(test, rules)["stats"]
+            out_of_sample = run_backtest(test, rules, name)["stats"]
         except ValueError:
             continue  # test slice too short for a portfolio
 
@@ -284,8 +330,8 @@ def run_walk_forward(
                 "train_start": train.index[0],
                 "test_start": test.index[0],
                 "test_end": test.index[-1],
-                "best_rsi_buy": rules["rsi_buy"],
-                "best_rsi_sell": rules["rsi_sell"],
+                "best_rsi_buy": rules.get("rsi_buy", "—"),
+                "best_rsi_sell": rules.get("rsi_sell", "—"),
                 "in_sample_return_pct": float(best["total_return_pct"]),
                 "oos_return_pct": out_of_sample["total_return_pct"],
                 "oos_trades": out_of_sample["total_trades"],
@@ -330,34 +376,57 @@ def run_parameter_sweep(
     rsi_buy_values: list[int] | None = None,
     rsi_sell_values: list[int] | None = None,
     base_rules: dict | None = None,
+    strategy_name: str | None = None,
 ) -> pd.DataFrame:
     """
     Backtests every rsi_buy x rsi_sell combination over the same data and
-    returns a DataFrame ranked by total return. Inputs (RSI, MACD, trailing
-    value area) are computed once and reused for every combination.
+    returns a DataFrame ranked by total return. Inputs are computed once and
+    reused for every combination.
+
+    Only meaningful for strategies that actually use RSI thresholds; for others
+    the grid collapses to a single row, because there is nothing to vary.
     """
     if len(candles) < 100:
         raise ValueError("Parameter sweep needs at least 100 candles.")
 
+    name = _resolve(strategy_name)
     rsi_buy_values = rsi_buy_values or config.SWEEP_RSI_BUY
     rsi_sell_values = rsi_sell_values or config.SWEEP_RSI_SELL
-    inputs = _compute_signal_inputs(candles)
-    merged_base = _merge_rules(base_rules)
+    inputs = strategy_inputs.build_inputs(candles)
+    merged_base = _merge_rules(base_rules, name)
+
+    # Sweep only the knobs this strategy actually declares — varying a parameter
+    # a strategy ignores would produce identical rows dressed up as a grid.
+    sweeps_buy = "rsi_buy" in merged_base
+    sweeps_sell = "rsi_sell" in merged_base
+    buy_grid = rsi_buy_values if sweeps_buy else [None]
+    sell_grid = rsi_sell_values if sweeps_sell else [None]
 
     results: list[dict] = []
-    for rsi_buy in rsi_buy_values:
-        for rsi_sell in rsi_sell_values:
-            if rsi_sell <= rsi_buy:
+    for rsi_buy in buy_grid:
+        for rsi_sell in sell_grid:
+            if sweeps_buy and sweeps_sell and rsi_sell <= rsi_buy:
                 continue  # nonsensical combination
-            rules = {**merged_base, "rsi_buy": rsi_buy, "rsi_sell": rsi_sell}
-            signals = _build_signals(inputs, rules)
+            rules = dict(merged_base)
+            if sweeps_buy:
+                rules["rsi_buy"] = rsi_buy
+            if sweeps_sell:
+                rules["rsi_sell"] = rsi_sell
+            signals = _build_signals(inputs, rules, name)
             portfolio = _build_portfolio(candles["close"], signals, rules)
             stats = _extract_stats(portfolio)
-            results.append({"rsi_buy": rsi_buy, "rsi_sell": rsi_sell, **stats})
+            results.append(
+                {
+                    "rsi_buy": rules.get("rsi_buy", "—"),
+                    "rsi_sell": rules.get("rsi_sell", "—"),
+                    **stats,
+                }
+            )
 
     sweep = pd.DataFrame(results).sort_values("total_return_pct", ascending=False)
     logging.info(
-        "Parameter sweep: %d combinations, best return %.2f%%",
-        len(sweep), float(sweep["total_return_pct"].iloc[0]) if not sweep.empty else 0.0,
+        "Parameter sweep [%s]: %d combinations, best return %.2f%%",
+        name, len(sweep),
+        float(sweep["total_return_pct"].iloc[0]) if not sweep.empty else 0.0,
     )
     return sweep.reset_index(drop=True)

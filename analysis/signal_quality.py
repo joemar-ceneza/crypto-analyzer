@@ -52,35 +52,29 @@ def _bullish_side(side: str) -> bool:
 # ======================================================
 # INDIVIDUAL FACTORS
 # ======================================================
-def _regime_fit(side: str, regime: dict) -> dict:
+def _regime_fit(side: str, regime: dict, strategy_spec) -> dict:
     """
-    Is this KIND of signal even appropriate in this regime? The default rules are
-    mean-reversion (sell strength / buy weakness), so a trending regime is
-    actively hostile to them.
+    Is this strategy even appropriate in this regime?
+
+    Each strategy declares the regimes it suits, so this asks the strategy rather
+    than assuming. Running a range strategy in a trend is the most common way
+    these rules lose money, and this factor is what says so out loud.
     """
-    if regime["regime"] == "Ranging":
+    current = regime["regime"]
+    if strategy_spec.suits(current):
         return _factor(
             "regime_fit", _SUPPORTS,
-            "Ranging regime — mean-reversion signals like this are at their most reliable",
+            f"{current} regime — {strategy_spec.label} is designed for exactly this",
         )
-    if regime["regime"] == "Trending":
-        trend_matches_side = (
-            (regime["direction"] == "up" and _bullish_side(side))
-            or (regime["direction"] == "down" and not _bullish_side(side))
-        )
-        if trend_matches_side:
-            return _factor(
-                "regime_fit", _SUPPORTS,
-                f"Trending {regime['direction']} and this signal goes with the trend",
-            )
-        return _factor(
-            "regime_fit", _CONFLICTS,
-            f"Trending {regime['direction']} — this signal fights the trend, and "
-            f"mean-reversion signals fail often in trends",
-        )
+
+    import strategies  # local import — avoids a cycle at module load
+
+    better = [spec.label for spec in strategies.suited_to(current)]
+    suggestion = f" ({', '.join(better)} would suit it)" if better else ""
     return _factor(
-        "regime_fit", _NEUTRAL,
-        "Transitional regime — no regime edge either way",
+        "regime_fit", _CONFLICTS,
+        f"{current} regime — {strategy_spec.label} is built for "
+        f"{'/'.join(strategy_spec.suitable_regimes)} markets, not this one{suggestion}",
     )
 
 
@@ -302,16 +296,22 @@ def _invalidation(side: str, analysis: dict) -> str:
 # PUBLIC ENTRY POINT
 # ======================================================
 def run_signal_quality(
-    analysis: dict, side: str, regime: dict, confluence: dict | None = None
+    analysis: dict,
+    side: str,
+    regime: dict,
+    confluence: dict | None = None,
+    strategy_name: str | None = None,
 ) -> dict:
     """
     Explains and scores a signal.
 
     `side` — "BUY" or "SELL". `regime` — from regime.run_regime().
     `confluence` — optional, from confluence.run_confluence().
+    `strategy_name` — the strategy that produced the signal; defaults to the
+    active one. It decides whether the current regime suits the approach at all.
 
     Returns a dict:
-        side, confidence_pct, quality ("High"/"Moderate"/"Low")
+        side, strategy, confidence_pct, quality ("High"/"Moderate"/"Low")
         reasons: plain-English supporting evidence
         conflicts: plain-English contradicting evidence
         factors: every factor with its verdict, weight and detail (auditable)
@@ -322,8 +322,14 @@ def run_signal_quality(
     if side not in ("BUY", "SELL"):
         raise ValueError(f"side must be BUY or SELL, got {side!r}")
 
+    import strategies  # local import — avoids a cycle at module load
+    from backtesting import strategy as strategy_runner
+
+    name = strategy_name or strategy_runner.active_strategy_name()
+    strategy_spec = strategies.spec(name)
+
     factors = [
-        _regime_fit(side, regime),
+        _regime_fit(side, regime, strategy_spec),
         _trend_alignment(side, analysis),
         _higher_timeframe_factor(side, confluence),
         _structure_factor(side, analysis),
@@ -347,9 +353,11 @@ def run_signal_quality(
 
     summary = _summarize(side, quality, confidence, conflicts)
 
-    logging.info("Signal quality: %s %s (%.0f%%)", side, quality, confidence)
+    logging.info("Signal quality [%s]: %s %s (%.0f%%)", name, side, quality, confidence)
     return {
         "side": side,
+        "strategy": name,
+        "strategy_label": strategy_spec.label,
         "confidence_pct": confidence,
         "quality": quality,
         "reasons": reasons,

@@ -19,6 +19,7 @@ Everything runs **locally on your own PC**. No cloud, no account, no API key.
 - [The dashboard, view by view](#the-dashboard-view-by-view)
 - [Understanding the analysis](#understanding-the-analysis)
 - [Signal explainability](#signal-explainability)
+- [Strategies](#strategies)
 - [The strategy rules (and their known weakness)](#the-strategy-rules-and-their-known-weakness)
 - [Telegram alerts](#telegram-alerts)
 - [Running it automatically (Task Scheduler)](#running-it-automatically-task-scheduler)
@@ -380,6 +381,60 @@ look-ahead bias dressed up as insight.
 
 ---
 
+## Strategies
+
+Strategies are **interchangeable**. Each is a small module in `strategies/` that
+*consumes* the shared market analysis — it never calculates its own indicators —
+and declares the market regimes it is designed for. That declaration is the
+important part: it is what lets the app tell you when you are running the wrong
+tool for the market.
+
+| Strategy | Suited to | Entry | Exit |
+|---|---|---|---|
+| **Mean Reversion** *(default)* | Ranging | below VAL **and** RSI < buy **and** MACD cross up | reaches VAH **or** RSI > sell |
+| **Trend Following** | Trending | EMA 20>50>200 **and** ADX ≥ min **and** MACD cross up | closes below EMA 50 **or** MACD cross down |
+| **Breakout** | Trending, Transitional | closes above the prior N-bar high **on rising volume** | closes below the prior N-bar low |
+| **Pullback** | Trending | uptrend **and** price dips to EMA 20 **and** RSI turns up | closes below EMA 50 **or** RSI > sell |
+| **Range Trading** | Ranging | price at/below VAL (no momentum gate) | price at/above VAH **or** RSI > sell |
+
+Pick the default in **⚙️ Settings** — it drives the chart markers, the alerts,
+and the backtests together. Test any other one ad-hoc in the **🧪 Strategy Lab**
+without changing your default.
+
+### Regime fit — the point of all this
+When the active strategy doesn't match the current regime, the app says so, in
+the Strategy Lab and in every signal's confidence:
+
+> ⚠️ **Mean Reversion** is built for **Ranging** markets, but the regime right
+> now is **Trending**. Suited to it: **Trend Following, Breakout, Pullback**.
+> Signals from it will score low confidence, and rightly so.
+
+That warning is generated from the strategy's own `suitable_regimes` — nothing
+is hardcoded, so a new strategy is covered the moment you register it.
+
+### Comparing them
+**⚖️ Compare all** runs every strategy over the same candles. Inputs are built
+once and shared, so it costs barely more than a single backtest.
+
+**It ranks nothing.** One window on one symbol is a single sample, and `suits`
+describes the regime a strategy is *designed* for while the test window almost
+certainly spans several. Use it to spot strategies that never fire, and to see
+how differently one market treats each approach — then confirm anything
+interesting with **Walk-forward**.
+
+### Adding your own
+1. Create `strategies/my_idea.py` with a `SPEC` (a `StrategySpec`) and a
+   `generate(inputs, rules) -> (entries, exits)`.
+2. Add the module to `_MODULES` in `strategies/__init__.py`.
+
+That's it — it appears in the Settings picker, the Strategy Lab, Compare all,
+the alerts and the signal log automatically. Read what you need from `inputs`
+(RSI, MACD, EMAs, ADX, ATR, trailing VAL/VAH/POC, shifted channel highs/lows,
+volume ratio) and **never recompute an indicator** — that's what the bundle is
+for, and it's what keeps every strategy honest about look-ahead.
+
+---
+
 ## The strategy rules (and their known weakness)
 
 Default rules, used by the chart markers, the alerts, and the backtester alike:
@@ -581,8 +636,16 @@ crypto-analyzer/
 │   ├── scorecard.py            # grades signals against what price did next
 │   ├── calibration.py          # grades the grader: is confidence informative?
 │   └── report_generator.py     # analysis aggregation + markdown report
+├── strategies/                 # interchangeable strategies (consume analysis)
+│   ├── base.py                 # the StrategySpec contract
+│   ├── inputs.py               # every input, computed once, all trailing
+│   ├── mean_reversion.py       # fade extremes back to value (Ranging)
+│   ├── trend_following.py      # ride confirmed trends (Trending)
+│   ├── breakout.py             # break the range on volume (Trending/Transitional)
+│   ├── pullback.py             # buy dips inside an uptrend (Trending)
+│   └── range_trading.py        # fade the value-area edges (Ranging)
 ├── backtesting/
-│   └── strategy.py             # rules, VectorBT, parameter sweep, walk-forward
+│   └── strategy.py             # runs strategies: VectorBT, sweep, walk-forward, compare
 ├── alerts/
 │   ├── notifier.py             # Telegram sender (credentials from .env)
 │   └── signal_watcher.py       # new signal detection + dedup + cooldown

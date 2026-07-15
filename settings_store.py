@@ -24,6 +24,7 @@ import config
 
 # Keys the dashboard is allowed to override, with the type each must be.
 EDITABLE_KEYS: dict[str, type] = {
+    "ACTIVE_STRATEGY": str,
     "ALERT_SYMBOLS": list,
     "ALERT_TIMEFRAMES": list,
     "ALERT_ON_BUY": bool,
