@@ -28,7 +28,7 @@ import logging
 import pandas as pd
 
 import config
-from analysis import confluence, report_generator, scorecard, signal_quality
+from analysis import confluence, report_generator, sampling, scorecard, signal_quality
 from data import signal_log
 
 # Enough history behind a signal for the indicators to be meaningful.
@@ -161,42 +161,10 @@ def _sample_quality(graded: pd.DataFrame) -> dict:
     """
     Judges whether the sample can support a conclusion at all.
 
-    Signals are not independent draws. Thirty sells fired during one two-week
-    downtrend on two correlated coins are ONE market episode observed thirty
-    times, and a hit rate computed from them says more about that fortnight than
-    about the score. Returns span/diversity facts plus explicit warnings.
+    Delegates to the shared sampling gate so that calibration and the
+    performance breakdown hold evidence to the same standard.
     """
-    span_days = int(
-        (graded["datetime_utc"].max() - graded["datetime_utc"].min()).total_seconds() // 86400
-    )
-    symbols = int(graded["symbol"].nunique())
-    sides = int(graded["side"].nunique())
-
-    warnings: list[str] = []
-    if span_days < config.CALIBRATION_MIN_SPAN_DAYS:
-        warnings.append(
-            f"All signals come from a {span_days}-day window — that is likely a "
-            f"single market episode, not {len(graded)} independent tests."
-        )
-    if symbols < config.CALIBRATION_MIN_SYMBOLS:
-        warnings.append(
-            f"Only {symbols} symbol(s) represented, and major coins move together "
-            f"— they do not provide independent evidence."
-        )
-    if sides < 2:
-        only = graded["side"].iloc[0]
-        warnings.append(
-            f"Every graded signal is a {only} — this measures the {only} rule, "
-            f"not the score as a whole."
-        )
-
-    return {
-        "span_days": span_days,
-        "symbols": symbols,
-        "sides": sides,
-        "warnings": warnings,
-        "sufficient": not warnings,
-    }
+    return sampling.assess(graded, subject="the score", check_sides=True)
 
 
 def _observation(low, high) -> str:

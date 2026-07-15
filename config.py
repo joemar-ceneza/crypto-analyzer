@@ -244,6 +244,17 @@ SCORECARD_HORIZONS = [6, 24, 72]
 SCORECARD_MIN_MOVE_PCT = 0.002   # moves smaller than 0.2% count as "flat", not a hit
 
 # ======================================================
+# PERFORMANCE BREAKDOWN (which strategy / symbol / timeframe / RSI band worked?)
+# ======================================================
+# Every cut of the data makes each group smaller, and small groups produce
+# spectacular hit rates by luck alone. A group with fewer graded signals than
+# this is still shown, but is marked as under-sampled and never ranked.
+BREAKDOWN_MIN_PER_GROUP = 10
+# Best-vs-worst gaps narrower than this are reported as "no meaningful
+# separation" rather than as a winner — a 3-point spread is noise.
+BREAKDOWN_MIN_GAP_PCT = 10.0
+
+# ======================================================
 # CONFIDENCE CALIBRATION (does the confidence score actually mean anything?)
 # ======================================================
 # The confidence score is a hypothesis until measured. Calibration recomputes the

@@ -199,10 +199,49 @@ several horizons (6 / 24 / 72 candles):
 | `graded` | signals with enough future data to judge |
 | `hit_rate_pct` | share of graded signals that moved the right way |
 | `avg_edge_pct` | average move *in the signal's favour* (positive is good for both sides) |
+| `profit_factor` | gross favourable ÷ gross adverse movement. Above 1.0 = the right calls moved further than the wrong ones. `∞` means nothing has gone against it yet — only ever seen on tiny samples |
+| `avg_mfe_pct` | **maximum favourable excursion** — how far price ran *in favour* before the horizon |
+| `avg_mae_pct` | **maximum adverse excursion** — how far price ran *against* before the horizon |
 | `pending` | too recent to grade yet |
+
+MFE and MAE exist because a close-to-close return hides the path. A SELL that
+finished 1% down after first running 4% against you is not the same trade as one
+that fell quietly, even though both count as a "hit". **When average MAE is
+larger than average MFE, the signals hurt before they helped.**
 
 If a rule is doing **worse than a coin flip** over a meaningful sample, the view
 says so in a red banner. That is the point — it is designed to tell you bad news.
+
+#### Breakdown — which signals actually work?
+Underneath the summary, the same graded signals get sliced along five dimensions
+so you can ask research questions instead of just reading one number:
+
+| Break down by | Answers |
+|---|---|
+| **Strategy** | Which strategy performs best on signals it actually fired? |
+| **Symbol** | Which coins is this working on — and which are dragging? |
+| **Timeframe** | Is 1h or 4h carrying the results? |
+| **Side** | Are the buys or the sells the problem? |
+| **RSI at signal** | Which RSI band produced the good entries? |
+
+Pick the horizon to grade over, then the dimension. Two guardrails apply:
+
+- **Under-sampled groups are never ranked.** Every cut makes each group smaller,
+  and small groups produce spectacular hit rates by luck alone. Groups with fewer
+  than `BREAKDOWN_MIN_PER_GROUP` (default 10) graded signals are still shown, but
+  marked `enough = False` and sunk to the bottom of the table.
+- **Findings are withheld when the sample cannot support them.** If all your
+  signals come from one short window on two correlated coins, that is *one market
+  episode observed N times*, not N independent tests. The view says so in plain
+  English and refuses to name a winner. The numbers are still real — they just
+  describe that stretch of market rather than the rules that produced it.
+
+This is the same honesty gate the [confidence calibration](#validating-the-score-itself)
+uses, shared via `analysis/sampling.py` so the two cannot drift apart.
+
+> **These are signal diagnostics, not trade results.** There is no position
+> sizing, no fees and no slippage here. For those, use the
+> [Strategy Lab](#-strategy-lab) backtest and walk-forward.
 
 ### ⚙️ Settings
 Change how the app behaves **without editing code**:
@@ -626,6 +665,7 @@ Key groups in `config.py`:
 | Report / risk | "near level" %, ATR risk thresholds |
 | Backtesting | starting cash, fees, rule defaults, sweep grid, walk-forward splits |
 | Scorecard | grading horizons, minimum move |
+| Breakdown | minimum signals per group, minimum gap to call a winner |
 | Alerts | symbols, timeframes, buy/sell toggles, cooldown, freshness, state file |
 | Dashboard | title, default candles, refresh interval, local timezone |
 
@@ -682,6 +722,8 @@ crypto-analyzer/
 │   ├── trade_plan.py           # entry/stop/targets/R:R/invalidation
 │   ├── confluence.py           # multi-timeframe alignment (live + historical)
 │   ├── scorecard.py            # grades signals against what price did next
+│   ├── breakdown.py            # slices graded signals by strategy/symbol/TF/RSI
+│   ├── sampling.py             # shared gate: can this sample conclude anything?
 │   ├── calibration.py          # grades the grader: is confidence informative?
 │   └── report_generator.py     # analysis aggregation + markdown report
 ├── strategies/                 # interchangeable strategies (consume analysis)
@@ -742,9 +784,10 @@ pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-61 tests covering the indicator math, volume profile, market structure,
-strategy signals, database round-trips, alerts, settings, VWAP, and scorecard
-grading. They use **synthetic data and hit no network**, so they're fast and
+148 tests covering the indicator math, volume profile, market structure,
+strategy signals, database round-trips, alerts, settings, VWAP, scorecard
+grading, excursion (MFE/MAE) math, and the sampling gate's refusal to rank
+under-sampled groups. They use **synthetic data and hit no network**, so they're fast and
 deterministic. GitHub Actions runs the same suite on every push
 (`.github/workflows/ci.yml`).
 

@@ -31,6 +31,7 @@ import strategies
 import utils
 from ai import analyzer
 from analysis import (
+    breakdown,
     calibration,
     confluence,
     report_generator,
@@ -774,13 +775,17 @@ def _render_scorecard_view(settings: dict) -> None:
 
     summary = result["summary"]
     st.dataframe(
-        summary.style.format({"hit_rate_pct": "{:.1f}%", "avg_edge_pct": "{:+.2f}%"}),
+        summary.style.format(_SCORECARD_FORMATS, na_rep="—"),
         width="stretch", hide_index=True,
     )
     st.caption(
         "**hit_rate_pct** = share of graded signals that moved the right way. "
         "**avg_edge_pct** = average move in the signal's favour (positive is good "
-        "for both sides). **pending** = too recent to grade yet."
+        "for both sides). **profit_factor** = gross favourable ÷ gross adverse "
+        "movement; ∞ means nothing has gone against it yet, which only happens on "
+        "tiny samples. **avg_mfe_pct** / **avg_mae_pct** = how far price ran in "
+        "favour / against before the horizon was reached — MAE above MFE means the "
+        "signal hurt before it helped. **pending** = too recent to grade yet."
     )
 
     # Call out a rule that is doing worse than a coin flip — that is the whole
@@ -802,7 +807,100 @@ def _render_scorecard_view(settings: dict) -> None:
         st.dataframe(graded, width="stretch", hide_index=True)
 
     st.divider()
+    _render_breakdown(result)
+
+    st.divider()
     _render_calibration(settings)
+
+
+# ======================================================
+# PERFORMANCE BREAKDOWN
+# ======================================================
+def _format_profit_factor(value: float) -> str:
+    """
+    Renders the profit factor. Kept short enough not to overflow the column:
+    NaN (nothing graded) and inf (nothing went against the signal — only ever
+    seen on samples too small to mean anything) get symbols, not sentences.
+    """
+    if value != value:
+        return "—"
+    if value == float("inf"):
+        return "∞"
+    return f"{value:.2f}"
+
+
+_SCORECARD_FORMATS = {
+    "hit_rate_pct": "{:.1f}%",
+    "avg_edge_pct": "{:+.2f}%",
+    "profit_factor": _format_profit_factor,
+    "avg_mfe_pct": "{:.2f}%",
+    "avg_mae_pct": "{:.2f}%",
+}
+
+
+def _render_breakdown(result: dict) -> None:
+    """
+    Cuts the graded signals by strategy, symbol, timeframe, side and RSI band.
+
+    The analysis lives in analysis/breakdown.py — this only chooses a horizon,
+    picks a dimension and draws the table it is handed.
+    """
+    st.subheader("Breakdown — which signals actually work?")
+    st.caption(
+        "The same graded signals, sliced. Use it to ask which strategy, symbol, "
+        "timeframe or RSI band is carrying the results — and which is dragging."
+    )
+
+    horizons = result["horizons"]
+    horizon = st.selectbox(
+        "Grade over",
+        horizons,
+        index=min(1, len(horizons) - 1),  # the middle horizon is the useful default
+        format_func=lambda value: f"{value} candles later",
+        key="breakdown_horizon",
+    )
+
+    cut = breakdown.run_breakdown(result["graded"], horizon)
+    if not cut["tables"]:
+        st.info("Nothing graded at this horizon yet.")
+        return
+
+    # The sample verdict comes first: it decides how much the tables below are
+    # worth, so it must not sit underneath them.
+    if cut["trustworthy"]:
+        for finding in cut["findings"]:
+            st.info(finding)
+    else:
+        st.warning(
+            "**These tables cannot rank anything yet.**\n\n"
+            + "\n".join(f"- {reason}" for reason in cut["sample"]["warnings"])
+            + "\n\nThe numbers below are real, but they describe this particular "
+            "stretch of market rather than the rules that produced them. Findings "
+            "are withheld until the sample is broader."
+        )
+
+    labels = list(breakdown.DIMENSIONS.values())
+    # segmented_control, not tabs: tabs reset to the first one on every rerun.
+    chosen_label = st.segmented_control(
+        "Break down by", labels, default=labels[0], key="breakdown_dimension"
+    )
+    if not chosen_label:
+        return
+    dimension = next(k for k, v in breakdown.DIMENSIONS.items() if v == chosen_label)
+
+    table = cut["tables"][dimension]
+    st.dataframe(
+        table.style.format(_SCORECARD_FORMATS, na_rep="—"),
+        width="stretch", hide_index=True,
+    )
+    st.caption(
+        f"**enough** = at least {config.BREAKDOWN_MIN_PER_GROUP} graded signals; "
+        "rows below that are shown but never ranked. **profit_factor** = gross "
+        "favourable movement ÷ gross adverse movement (above 1.0 means the right "
+        "calls moved further than the wrong ones). **avg_mfe_pct** / "
+        "**avg_mae_pct** = how far price ran in favour / against before the "
+        "horizon — MAE above MFE means these signals hurt before they helped."
+    )
 
 
 @st.cache_data(ttl=900, show_spinner="Rebuilding past confidence, signal by signal…")
