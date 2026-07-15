@@ -88,6 +88,16 @@ BOLLINGER_PERIOD = 20
 BOLLINGER_STD = 2.0
 
 # ======================================================
+# VWAP
+# ======================================================
+VWAP_SESSION_FREQ = "D"          # session VWAP resets on this boundary (D = daily)
+# Anchored VWAP starts from a chosen bar. "auto" anchors to the extreme
+# (lowest low / highest high) of the lookback window, which is where traders
+# usually anchor. The dashboard can override with an explicit date.
+VWAP_ANCHOR_MODE = "auto"
+VWAP_ANCHOR_LOOKBACK = 500       # candles searched for the auto anchor
+
+# ======================================================
 # DIVERGENCE DETECTION
 # ======================================================
 DIVERGENCE_LOOKBACK_BARS = 80    # only swings inside this window count
@@ -126,6 +136,13 @@ BACKTEST_USE_VAH_TARGET = True   # SELL triggers when price reaches VAH
 SWEEP_RSI_BUY = [25, 30, 35, 40]
 SWEEP_RSI_SELL = [60, 65, 70, 75]
 
+# Walk-forward validation: the history is split into WALK_FORWARD_SPLITS
+# segments. Each segment optimizes on its in-sample part and is then scored on
+# the untouched out-of-sample part that follows. Out-of-sample results are the
+# only ones that mean anything — in-sample results are curve-fitted by design.
+WALK_FORWARD_SPLITS = 4
+WALK_FORWARD_TRAIN_PCT = 0.7     # share of each segment used for optimization
+
 # ======================================================
 # DATA COLLECTION (main.py --collect, for Task Scheduler)
 # ======================================================
@@ -138,7 +155,11 @@ COLLECT_TIMEFRAMES = TIMEFRAMES   # timeframes kept warm per symbol
 # Credentials live in .env, never here:
 #   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 ALERT_SYMBOLS = ["ETH/USDT", "BTC/USDT"]  # symbols watched for signals
-ALERT_TIMEFRAME = "1h"                     # timeframe the alert rule runs on
+# Every symbol is checked on EVERY timeframe listed here, so a signal on the
+# 4h is not missed while watching the 1h. Each symbol+timeframe+side is
+# de-duplicated independently.
+ALERT_TIMEFRAMES = ["1h", "4h"]
+ALERT_TIMEFRAME = ALERT_TIMEFRAMES[0]      # back-compat default for single-tf callers
 ALERT_CANDLES = 600                        # candles fetched per alert check
 ALERT_RECENT_BARS = 3                      # only alert if the signal fired within
                                            # this many latest closed candles
@@ -148,6 +169,14 @@ ALERT_COOLDOWN_BARS = 6                    # min candles between alerts of the
                                            # same symbol + side (anti-spam)
 ALERT_STATE_FILE = os.path.join(OUTPUT_DIR, "alert_state.json")
 SIGNAL_LOG_FILE = os.path.join(OUTPUT_DIR, "signal_history.csv")
+
+# ======================================================
+# SIGNAL SCORECARD (was the signal right?)
+# ======================================================
+# Forward horizons (in candles) each signal is graded over. A SELL "hits" when
+# price is lower N candles later; a BUY hits when price is higher.
+SCORECARD_HORIZONS = [6, 24, 72]
+SCORECARD_MIN_MOVE_PCT = 0.002   # moves smaller than 0.2% count as "flat", not a hit
 
 # ======================================================
 # DASHBOARD

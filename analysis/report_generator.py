@@ -20,7 +20,7 @@ import pandas as pd
 
 import config
 import utils
-from indicators import momentum, support_resistance, trend, volatility, volume_profile
+from indicators import momentum, support_resistance, trend, volatility, volume_profile, vwap
 from analysis import market_structure
 
 
@@ -45,6 +45,7 @@ def run_analysis(symbol: str, timeframe: str, candles: pd.DataFrame) -> dict:
     momentum_result = momentum.run_momentum_analysis(candles)
     volatility_result = volatility.run_volatility_analysis(candles)
     structure_result = market_structure.run_market_structure(candles)
+    vwap_result = vwap.run_vwap(candles)
 
     price = float(candles["close"].iloc[-1])
     return {
@@ -59,6 +60,7 @@ def run_analysis(symbol: str, timeframe: str, candles: pd.DataFrame) -> dict:
         "momentum": momentum_result,
         "volatility": volatility_result,
         "structure": structure_result,
+        "vwap": vwap_result,
         "risk": _assess_risk(price, momentum_result, volatility_result, levels, structure_result),
     }
 
@@ -249,6 +251,7 @@ def generate_report(
 - **MACD:** {momentum_result['macd_state']} (histogram {momentum_result['macd_hist']:+.2f})
 - **Stoch RSI:** %K {momentum_result['stoch_rsi_k']:.0f} / %D {momentum_result['stoch_rsi_d']:.0f}
 - **Divergence:** {(momentum_result['divergence']['type'] or 'none').capitalize()}{' — ' + momentum_result['divergence']['detail'] if momentum_result['divergence']['type'] else ''}
+- **VWAP:** session {utils.format_price(analysis['vwap']['vwap_session'])} — price is **{analysis['vwap']['price_vs_vwap']}** it; anchored {utils.format_price(analysis['vwap']['vwap_anchored'])} (from {analysis['vwap']['anchor_time'].strftime('%Y-%m-%d %H:%M UTC')})
 - **EMA trend:** {trend_result['ema_alignment']}
 - **ADX:** {trend_result['adx']:.1f} ({'trending' if trend_result['adx'] >= config.ADX_TREND_THRESHOLD else 'weak trend / ranging'})
 - **ATR:** {utils.format_price(analysis['volatility']['atr'])} ({analysis['volatility']['atr_pct']:.2%} of price)

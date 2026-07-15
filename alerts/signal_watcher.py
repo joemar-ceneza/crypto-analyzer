@@ -24,16 +24,24 @@ import os
 import pandas as pd
 
 import config
+import settings_store
 import utils
 from alerts import notifier
 from analysis import report_generator
 from backtesting import strategy
 from data import exchange, signal_log
 
-_SIDES = [
-    ("SELL", "exits", config.ALERT_ON_SELL, "🔻"),
-    ("BUY", "entries", config.ALERT_ON_BUY, "🟢"),
-]
+
+def _sides() -> list[tuple]:
+    """
+    (side, signal column, enabled, icon) for each side. Read at call time so
+    dashboard setting changes take effect on the next scheduled run without
+    a restart.
+    """
+    return [
+        ("SELL", "exits", settings_store.get("ALERT_ON_SELL"), "🔻"),
+        ("BUY", "entries", settings_store.get("ALERT_ON_BUY"), "🟢"),
+    ]
 
 
 # ======================================================
@@ -75,7 +83,7 @@ def _fresh_edge(signals: pd.DataFrame, column: str) -> tuple | None:
 
     edge_time = fired.index[-1]
     bars_from_end = len(signals) - 1 - signals.index.get_loc(edge_time)
-    if bars_from_end >= config.ALERT_RECENT_BARS:
+    if bars_from_end >= settings_store.get("ALERT_RECENT_BARS"):
         return None
     return edge_time, signals.loc[edge_time]
 
@@ -153,10 +161,11 @@ def _check_symbol(symbol: str, timeframe: str, state: dict) -> int:
     signal_log.log_signals(symbol, timeframe, signals)  # history grows every run
 
     timeframe_ms = _timeframe_ms(closed.index)
+    cooldown_bars = settings_store.get("ALERT_COOLDOWN_BARS")
     analysis = None  # computed lazily, only when a fresh signal needs context
     sent = 0
 
-    for side, column, enabled, icon in _SIDES:
+    for side, column, enabled, icon in _sides():
         if not enabled:
             continue
         edge = _fresh_edge(signals, column)
@@ -169,7 +178,7 @@ def _check_symbol(symbol: str, timeframe: str, state: dict) -> int:
         last_ms = state.get(key, 0)
         if edge_ms <= last_ms:
             continue  # already alerted this signal
-        if timeframe_ms and edge_ms - last_ms < config.ALERT_COOLDOWN_BARS * timeframe_ms:
+        if timeframe_ms and edge_ms - last_ms < cooldown_bars * timeframe_ms:
             continue  # within cooldown window
 
         if analysis is None:
@@ -189,15 +198,19 @@ def _check_symbol(symbol: str, timeframe: str, state: dict) -> int:
 # PUBLIC ENTRY POINT
 # ======================================================
 def run_alert_check(
-    symbols: list[str] | None = None, timeframe: str | None = None
+    symbols: list[str] | None = None, timeframes: list[str] | str | None = None
 ) -> int:
     """
-    Checks every watched symbol for new buy/sell signals, logs them to the
-    signal history, and notifies via Telegram (when configured). Individual
-    symbol failures are logged and skipped. Returns alerts sent.
+    Checks every watched symbol on every watched timeframe for new buy/sell
+    signals, logs them to the signal history, and notifies via Telegram (when
+    configured). `timeframes` accepts a list or a single string. Individual
+    symbol/timeframe failures are logged and skipped. Returns alerts sent.
     """
-    symbols = symbols or config.ALERT_SYMBOLS
-    timeframe = timeframe or config.ALERT_TIMEFRAME
+    symbols = symbols or settings_store.get("ALERT_SYMBOLS")
+    if timeframes is None:
+        timeframes = settings_store.get("ALERT_TIMEFRAMES")
+    elif isinstance(timeframes, str):
+        timeframes = [timeframes]
 
     if not notifier.is_configured():
         logging.warning(
@@ -209,11 +222,15 @@ def run_alert_check(
     state = _load_state()
     sent = 0
     for symbol in symbols:
-        try:
-            sent += _check_symbol(symbol, timeframe, state)
-        except Exception as error:  # noqa: BLE001 — one bad symbol must not stop the rest
-            logging.error("Alert check failed for %s: %s", symbol, error)
+        for timeframe in timeframes:
+            try:
+                sent += _check_symbol(symbol, timeframe, state)
+            except Exception as error:  # noqa: BLE001 — one bad pair must not stop the rest
+                logging.error("Alert check failed for %s %s: %s", symbol, timeframe, error)
 
     _save_state(state)
-    logging.info("Alert check complete: %d new alert(s) sent.", sent)
+    logging.info(
+        "Alert check complete: %d new alert(s) across %d symbol/timeframe pair(s).",
+        sent, len(symbols) * len(timeframes),
+    )
     return sent

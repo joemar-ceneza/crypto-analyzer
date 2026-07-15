@@ -33,12 +33,18 @@ _PROFILE_RECALC_EVERY = 10
 # RULE SET
 # ======================================================
 def default_rules() -> dict:
-    """Returns the config-default strategy rules as an overridable dict."""
+    """
+    Returns the default strategy rules as an overridable dict. Values come from
+    the settings store, so rules saved from the dashboard are picked up by the
+    chart, the alerts, and the CLI alike.
+    """
+    import settings_store  # local import — keeps this module importable standalone
+
     return {
-        "rsi_buy": config.BACKTEST_RSI_BUY,
-        "rsi_sell": config.BACKTEST_RSI_SELL,
-        "use_val_filter": config.BACKTEST_USE_VAL_FILTER,
-        "use_vah_target": config.BACKTEST_USE_VAH_TARGET,
+        "rsi_buy": settings_store.get("BACKTEST_RSI_BUY"),
+        "rsi_sell": settings_store.get("BACKTEST_RSI_SELL"),
+        "use_val_filter": settings_store.get("BACKTEST_USE_VAL_FILTER"),
+        "use_vah_target": settings_store.get("BACKTEST_USE_VAH_TARGET"),
         "initial_cash": config.BACKTEST_INITIAL_CASH,
         "fees": config.BACKTEST_FEES,
     }
@@ -216,6 +222,107 @@ def run_backtest(candles: pd.DataFrame, rules: dict | None = None) -> dict:
         "signals": signals,
         "rules": merged,
     }
+
+
+def run_walk_forward(
+    candles: pd.DataFrame,
+    splits: int | None = None,
+    train_pct: float | None = None,
+    rsi_buy_values: list[int] | None = None,
+    rsi_sell_values: list[int] | None = None,
+) -> dict:
+    """
+    Walk-forward validation — the honest counterpart to a parameter sweep.
+
+    The history is cut into `splits` consecutive segments. In each segment the
+    rule grid is optimized on the first `train_pct` of the data (in-sample),
+    then those winning rules are applied — untouched — to the remaining part
+    (out-of-sample). Only the out-of-sample numbers are evidence: in-sample
+    results are curve-fitted by construction.
+
+    Returns a dict:
+        folds: DataFrame, one row per split (best in-sample rules + its OOS result)
+        oos_return_pct / oos_win_rate_pct: averages across folds
+        consistency_pct: share of folds whose out-of-sample return was positive
+    """
+    splits = splits or config.WALK_FORWARD_SPLITS
+    train_pct = train_pct or config.WALK_FORWARD_TRAIN_PCT
+    rsi_buy_values = rsi_buy_values or config.SWEEP_RSI_BUY
+    rsi_sell_values = rsi_sell_values or config.SWEEP_RSI_SELL
+
+    segment_size = len(candles) // splits
+    if segment_size < 200:
+        raise ValueError(
+            f"Not enough candles for {splits} walk-forward splits "
+            f"({len(candles)} candles). Load more history or reduce splits."
+        )
+
+    folds: list[dict] = []
+    for index in range(splits):
+        segment = candles.iloc[index * segment_size: (index + 1) * segment_size]
+        cut = int(len(segment) * train_pct)
+        train, test = segment.iloc[:cut], segment.iloc[cut:]
+        if len(train) < 150 or len(test) < 50:
+            continue
+
+        # 1) Optimize on the in-sample part only
+        in_sample = run_parameter_sweep(train, rsi_buy_values, rsi_sell_values)
+        if in_sample.empty:
+            continue
+        best = in_sample.iloc[0]
+        rules = {"rsi_buy": int(best["rsi_buy"]), "rsi_sell": int(best["rsi_sell"])}
+
+        # 2) Apply the winner to the untouched out-of-sample part
+        try:
+            out_of_sample = run_backtest(test, rules)["stats"]
+        except ValueError:
+            continue  # test slice too short for a portfolio
+
+        folds.append(
+            {
+                "fold": index + 1,
+                "train_start": train.index[0],
+                "test_start": test.index[0],
+                "test_end": test.index[-1],
+                "best_rsi_buy": rules["rsi_buy"],
+                "best_rsi_sell": rules["rsi_sell"],
+                "in_sample_return_pct": float(best["total_return_pct"]),
+                "oos_return_pct": out_of_sample["total_return_pct"],
+                "oos_trades": out_of_sample["total_trades"],
+                "oos_win_rate_pct": out_of_sample["win_rate_pct"],
+                "oos_max_drawdown_pct": out_of_sample["max_drawdown_pct"],
+            }
+        )
+
+    if not folds:
+        raise ValueError("Walk-forward produced no usable folds — need more history.")
+
+    frame = pd.DataFrame(folds)
+    positive = (frame["oos_return_pct"] > 0).sum()
+    total_trades = int(frame["oos_trades"].sum())
+    result = {
+        "folds": frame,
+        "oos_return_pct": float(frame["oos_return_pct"].mean()),
+        "oos_win_rate_pct": float(frame["oos_win_rate_pct"].mean()),
+        "consistency_pct": float(positive / len(frame) * 100),
+        "total_oos_trades": total_trades,
+    }
+    if total_trades == 0:
+        # Zero trades is not a 0% result — it means the rules never fired, so
+        # there is nothing to measure. Callers must say so rather than imply
+        # the strategy "broke even".
+        logging.warning(
+            "Walk-forward: 0 out-of-sample trades across %d folds — the rules "
+            "never triggered. Loosen them or use more history.", len(frame),
+        )
+    else:
+        logging.info(
+            "Walk-forward: %d folds | %d OOS trades | avg OOS return %.2f%% | "
+            "consistency %.0f%%",
+            len(frame), total_trades, result["oos_return_pct"],
+            result["consistency_pct"],
+        )
+    return result
 
 
 def run_parameter_sweep(

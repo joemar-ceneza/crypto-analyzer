@@ -26,11 +26,13 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 import config
+import settings_store
 import utils
 from ai import analyzer
-from analysis import confluence, report_generator
+from analysis import confluence, report_generator, scorecard
 from backtesting import strategy
 from data import database, exchange, signal_log
+from indicators import vwap as vwap_indicator
 
 utils.setup_logging()
 
@@ -59,6 +61,9 @@ _COLORS = {
     "rsi": "#9085e9",
     "macd": "#3987e5",
     "macd_signal": "#c98500",
+    "vwap": "#eda100",
+    "vwap_band": "#898781",
+    "vwap_anchored": "#e87ba4",
 }
 
 
@@ -253,6 +258,37 @@ def _add_volume_profile(figure: go.Figure, profile: dict, candles: pd.DataFrame)
     )
 
 
+def _add_vwap(figure: go.Figure, vwap_series: pd.DataFrame, show_bands: bool) -> None:
+    """Overlays session VWAP (+ optional bands) and anchored VWAP on the price panel."""
+    figure.add_trace(
+        go.Scatter(
+            x=vwap_series.index, y=vwap_series["vwap_session"],
+            name="VWAP", line=dict(color=_COLORS["vwap"], width=2, dash="dot"),
+        ),
+        row=1, col=1,
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=vwap_series.index, y=vwap_series["vwap_anchored"],
+            name="Anchored VWAP",
+            line=dict(color=_COLORS["vwap_anchored"], width=2),
+        ),
+        row=1, col=1,
+    )
+    if show_bands:
+        for column in ("vwap_upper", "vwap_lower"):
+            figure.add_trace(
+                go.Scatter(
+                    x=vwap_series.index, y=vwap_series[column],
+                    name="VWAP ±1σ", legendgroup="vwap_bands",
+                    showlegend=(column == "vwap_upper"),
+                    line=dict(color=_COLORS["vwap_band"], width=1, dash="dash"),
+                    opacity=0.5,
+                ),
+                row=1, col=1,
+            )
+
+
 def _add_momentum_panels(figure: go.Figure, momentum_series: pd.DataFrame) -> None:
     """Adds the RSI (row 3) and MACD (row 4) subpanels."""
     # RSI panel with overbought/oversold guides
@@ -377,11 +413,13 @@ def _build_chart(
     show_fib: bool,
     chart_bars: int,
     tz_name: str | None,
+    vwap_mode: str = "Off",
 ) -> go.Figure:
     """
     Assembles the full price/volume/RSI/MACD chart from an analysis dict.
     `chart_bars` — how many most-recent candles to render (drives zoom range).
     `tz_name` — display timezone for the x-axis (None = UTC).
+    `vwap_mode` — "Off" | "VWAP" | "VWAP + bands".
     """
     candles = _localize_index(analysis["candles"].tail(chart_bars), tz_name)
     trend_series = _localize_index(analysis["trend"]["series"].tail(chart_bars), tz_name)
@@ -396,6 +434,9 @@ def _build_chart(
     _add_volume_profile(figure, analysis["volume_profile"], candles)
     _add_levels(figure, analysis, show_fib)
     _add_momentum_panels(figure, momentum_series)
+    if vwap_mode != "Off" and "vwap" in analysis:
+        vwap_series = _localize_index(analysis["vwap"]["series"].tail(chart_bars), tz_name)
+        _add_vwap(figure, vwap_series, show_bands=(vwap_mode == "VWAP + bands"))
     if signals is not None:
         localized_signals = _localize_index(signals, tz_name)
         _add_signal_markers(figure, candles, localized_signals)
@@ -450,6 +491,11 @@ def _render_sidebar() -> dict:
 
     show_fib = st.sidebar.toggle("Fibonacci levels", value=False)
     show_markers = st.sidebar.toggle("Buy/sell markers", value=True)
+    vwap_mode = st.sidebar.selectbox(
+        "VWAP", ["Off", "VWAP", "VWAP + bands"], index=0,
+        help="Session VWAP (resets daily) + anchored VWAP from the last major "
+             "swing. Bands are ±1σ of price around session VWAP.",
+    )
 
     st.sidebar.divider()
     use_local_tz = st.sidebar.toggle(
@@ -475,6 +521,7 @@ def _render_sidebar() -> dict:
         "candle_count": candle_count,
         "show_fib": show_fib,
         "show_markers": show_markers,
+        "vwap_mode": vwap_mode,
         "tz_name": config.LOCAL_TZ if use_local_tz else None,
         "live_interval": config.LIVE_REFRESH_CHOICES[live_label],
     }
@@ -578,6 +625,141 @@ def _render_signals_view(settings: dict) -> None:
     )
 
 
+@st.cache_data(ttl=300, show_spinner="Grading signal history…")
+def _load_scorecard() -> dict:
+    """Runs the signal scorecard (cached — it may fetch candles to grade against)."""
+    return scorecard.run_scorecard()
+
+
+def _render_scorecard_view(settings: dict) -> None:
+    """Signal scorecard: did the logged signals actually work?"""
+    st.caption(
+        "Every logged signal graded against what price actually did afterwards. "
+        "A SELL 'hits' if price was lower N candles later; a BUY hits if higher. "
+        "Moves under 0.2% count as flat."
+    )
+    result = _load_scorecard()
+    if result["total_signals"] == 0:
+        st.info("No signals logged yet. Run `python main.py` or `--alerts` first.")
+        return
+    if result["summary"].empty:
+        st.warning("Signals exist but none could be graded (no candle data to compare).")
+        return
+
+    summary = result["summary"]
+    st.dataframe(
+        summary.style.format({"hit_rate_pct": "{:.1f}%", "avg_edge_pct": "{:+.2f}%"}),
+        width="stretch", hide_index=True,
+    )
+    st.caption(
+        "**hit_rate_pct** = share of graded signals that moved the right way. "
+        "**avg_edge_pct** = average move in the signal's favour (positive is good "
+        "for both sides). **pending** = too recent to grade yet."
+    )
+
+    # Call out a rule that is doing worse than a coin flip — that is the whole
+    # point of measuring, and it is easy to miss in a table.
+    for _, row in summary.iterrows():
+        if row["graded"] >= 10 and row["hit_rate_pct"] < 40:
+            st.error(
+                f"⚠️ {row['side']} signals hit only {row['hit_rate_pct']:.0f}% of the "
+                f"time over {row['horizon']} candles ({int(row['graded'])} graded). "
+                f"Worse than a coin flip — consider retuning these rules in Settings."
+            )
+            break
+
+    with st.expander(f"All graded signals ({len(result['graded'])})"):
+        graded = result["graded"].copy()
+        graded["datetime_utc"] = graded["datetime_utc"].dt.tz_convert(
+            settings["tz_name"] or "UTC"
+        )
+        st.dataframe(graded, width="stretch", hide_index=True)
+
+
+def _render_settings_view() -> None:
+    """Edit alert + strategy settings from the dashboard (persisted to JSON)."""
+    st.caption(
+        "Overrides saved here persist to `output/user_settings.json` and are picked "
+        "up by the dashboard, the CLI, and the scheduled alert task — no code edits, "
+        "no restart. Anything left alone falls back to `config.py`."
+    )
+
+    with st.form("settings_form"):
+        st.markdown("##### Alerts")
+        columns = st.columns(2)
+        alert_symbols = columns[0].multiselect(
+            "Symbols to watch", options=config.SYMBOL_CHOICES,
+            default=settings_store.get("ALERT_SYMBOLS"),
+        )
+        alert_timeframes = columns[1].multiselect(
+            "Timeframes to watch", options=config.TIMEFRAMES,
+            default=settings_store.get("ALERT_TIMEFRAMES"),
+            help="Every symbol is checked on every timeframe selected.",
+        )
+        toggle_columns = st.columns(4)
+        alert_on_buy = toggle_columns[0].toggle(
+            "Alert on BUY", value=settings_store.get("ALERT_ON_BUY")
+        )
+        alert_on_sell = toggle_columns[1].toggle(
+            "Alert on SELL", value=settings_store.get("ALERT_ON_SELL")
+        )
+        cooldown = toggle_columns[2].number_input(
+            "Cooldown (bars)", min_value=0, max_value=100,
+            value=settings_store.get("ALERT_COOLDOWN_BARS"),
+        )
+        recent = toggle_columns[3].number_input(
+            "Signal freshness (bars)", min_value=1, max_value=20,
+            value=settings_store.get("ALERT_RECENT_BARS"),
+        )
+
+        st.markdown("##### Strategy rules (chart markers, alerts, backtest)")
+        rule_columns = st.columns(4)
+        rsi_buy = rule_columns[0].slider(
+            "BUY when RSI below", 10, 50, settings_store.get("BACKTEST_RSI_BUY"), step=5
+        )
+        rsi_sell = rule_columns[1].slider(
+            "SELL when RSI above", 50, 90, settings_store.get("BACKTEST_RSI_SELL"), step=5
+        )
+        use_val = rule_columns[2].toggle(
+            "BUY only below VAL", value=settings_store.get("BACKTEST_USE_VAL_FILTER")
+        )
+        use_vah = rule_columns[3].toggle(
+            "SELL at VAH", value=settings_store.get("BACKTEST_USE_VAH_TARGET"),
+            help="Turning this OFF removes most sell signals — 'price reached VAH' "
+                 "fires constantly in an uptrend.",
+        )
+
+        saved = st.form_submit_button("💾 Save settings", type="primary")
+
+    if saved:
+        settings_store.save_overrides(
+            {
+                "ALERT_SYMBOLS": alert_symbols,
+                "ALERT_TIMEFRAMES": alert_timeframes,
+                "ALERT_ON_BUY": alert_on_buy,
+                "ALERT_ON_SELL": alert_on_sell,
+                "ALERT_COOLDOWN_BARS": int(cooldown),
+                "ALERT_RECENT_BARS": int(recent),
+                "BACKTEST_RSI_BUY": int(rsi_buy),
+                "BACKTEST_RSI_SELL": int(rsi_sell),
+                "BACKTEST_USE_VAL_FILTER": use_val,
+                "BACKTEST_USE_VAH_TARGET": use_vah,
+            }
+        )
+        st.cache_data.clear()
+        st.success("Settings saved. The next alert check will use them.")
+
+    if st.button("↩️ Reset to config.py defaults"):
+        settings_store.reset()
+        st.cache_data.clear()
+        st.rerun()
+
+    overrides = settings_store.load_overrides()
+    if overrides:
+        with st.expander(f"Active overrides ({len(overrides)})"):
+            st.json(overrides)
+
+
 def _collect_rule_inputs() -> dict:
     """Renders the strategy-lab rule controls; returns the rule dict."""
     columns = st.columns(4)
@@ -613,10 +795,68 @@ def _render_backtest_results(result: dict) -> None:
             st.dataframe(result["trades"], width="stretch")
 
 
-def _render_backtest_tab(candles: pd.DataFrame) -> None:
-    """Strategy lab: tunable rules, single backtest, and parameter sweep."""
+def _render_walk_forward_results(result: dict) -> None:
+    """Renders walk-forward fold table and the out-of-sample verdict."""
+    if result["total_oos_trades"] == 0:
+        st.warning(
+            "**No trades fired out-of-sample — there is nothing to measure.** "
+            "This is not a 0% result: the rules simply never triggered. The BUY "
+            "rule needs price below VAL *and* a low RSI *and* a MACD crossover on "
+            "the same candle, which is very rare. Loosen it in **Settings** "
+            "(raise the RSI threshold, or turn off the VAL filter), or load more "
+            "history, then try again."
+        )
+        st.dataframe(result["folds"], width="stretch", hide_index=True)
+        return
+
+    columns = st.columns(3)
+    columns[0].metric("Avg out-of-sample return", f"{result['oos_return_pct']:+.2f}%")
+    columns[1].metric("Avg OOS win rate", f"{result['oos_win_rate_pct']:.1f}%")
+    columns[2].metric("Consistency", f"{result['consistency_pct']:.0f}%",
+                      "folds profitable OOS", delta_color="off")
+
+    st.dataframe(
+        result["folds"].style.format(
+            {
+                "in_sample_return_pct": "{:+.2f}%", "oos_return_pct": "{:+.2f}%",
+                "oos_win_rate_pct": "{:.1f}%", "oos_max_drawdown_pct": "{:.2f}%",
+            }
+        ),
+        width="stretch", hide_index=True,
+    )
+    st.caption(
+        "Each fold tunes the RSI rules on its in-sample slice, then applies them "
+        "**untouched** to the out-of-sample slice that follows. Compare the two "
+        "columns: if in-sample looks great but out-of-sample doesn't, the rules "
+        "are curve-fitted, not predictive. **Only the OOS numbers are evidence.**"
+    )
+
+
+def _render_backtest_tab(candles: pd.DataFrame, settings: dict) -> None:
+    """Strategy lab: tunable rules, backtest, sweep, and walk-forward validation."""
     st.markdown("#### Strategy lab")
     rules = _collect_rule_inputs()
+
+    use_full_history = st.toggle(
+        "Use full stored history (from the local database)", value=False,
+        help="Backtest over every candle ever collected for this symbol/timeframe "
+             "(grown by `main.py --collect`), instead of just the candles loaded "
+             "for the chart.",
+    )
+    test_candles = candles
+    if use_full_history:
+        stored = database.load_candles(settings["symbol"], settings["timeframe"])
+        if len(stored) > len(candles):
+            test_candles = stored
+            st.info(f"Using {len(stored):,} stored candles "
+                    f"({stored.index[0].date()} → {stored.index[-1].date()}).")
+        else:
+            st.warning(
+                f"Only {len(stored):,} candles stored — not more than the "
+                f"{len(candles):,} already loaded. Run `python main.py --collect` "
+                "to grow the history."
+            )
+
     st.caption(
         f"BUY: RSI < {rules['rsi_buy']} + MACD bullish crossover"
         + (" + price below trailing VAL" if rules["use_val_filter"] else "")
@@ -625,19 +865,28 @@ def _render_backtest_tab(candles: pd.DataFrame) -> None:
         + " · First run compiles Numba — allow ~1 min."
     )
 
-    button_columns = st.columns([1, 1, 3])
+    button_columns = st.columns([1, 1, 1, 2])
     run_single = button_columns[0].button("▶ Run backtest", type="primary")
     run_sweep = button_columns[1].button("🧮 Parameter sweep")
+    run_walk = button_columns[2].button("🔬 Walk-forward")
+
+    if run_walk:
+        with st.spinner("Walk-forward validation (optimizing each fold)…"):
+            try:
+                _render_walk_forward_results(strategy.run_walk_forward(test_candles))
+            except ValueError as error:
+                st.error(str(error))
+        return
 
     if run_single:
         with st.spinner("Backtesting…"):
-            _render_backtest_results(strategy.run_backtest(candles, rules))
+            _render_backtest_results(strategy.run_backtest(test_candles, rules))
     elif run_sweep:
         with st.spinner(
             f"Sweeping {len(config.SWEEP_RSI_BUY) * len(config.SWEEP_RSI_SELL)} "
             "rule combinations…"
         ):
-            sweep = strategy.run_parameter_sweep(candles, base_rules=rules)
+            sweep = strategy.run_parameter_sweep(test_candles, base_rules=rules)
         st.markdown("**Combinations ranked by total return** — same data, "
                     "same VAL/VAH filters, only the RSI thresholds vary.")
         st.dataframe(
@@ -667,7 +916,7 @@ def _draw_chart(analysis: dict, settings: dict) -> None:
     st.plotly_chart(
         _build_chart(
             analysis, signals, settings["show_fib"],
-            settings["candle_count"], settings["tz_name"],
+            settings["candle_count"], settings["tz_name"], settings["vwap_mode"],
         ),
         width="stretch",
         config={"displayModeBar": True, "scrollZoom": True},
@@ -734,8 +983,8 @@ def main() -> None:
     # segmented_control instead of st.tabs: tabs reset to the first tab on
     # every rerun, so Strategy Lab results would render into a hidden panel.
     views = [
-        "📊 Chart", "🔎 Scan", "🔭 Confluence",
-        "📋 Market Report", "🧪 Strategy Lab", "📜 Signals",
+        "📊 Chart", "🔎 Scan", "🔭 Confluence", "📋 Market Report",
+        "🧪 Strategy Lab", "📜 Signals", "🎯 Scorecard", "⚙️ Settings",
     ]
     active_view = st.segmented_control(
         "View", views, default=views[0], key="active_view",
@@ -751,9 +1000,13 @@ def main() -> None:
     elif active_view == "📋 Market Report":
         _render_report_tab(analysis)
     elif active_view == "🧪 Strategy Lab":
-        _render_backtest_tab(candles)
+        _render_backtest_tab(candles, settings)
     elif active_view == "📜 Signals":
         _render_signals_view(settings)
+    elif active_view == "🎯 Scorecard":
+        _render_scorecard_view(settings)
+    elif active_view == "⚙️ Settings":
+        _render_settings_view()
 
 
 main()

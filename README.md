@@ -1,159 +1,458 @@
 # crypto-analyzer
 
-## What This Does
-A personal cryptocurrency trading intelligence dashboard. It pulls live and
-historical OHLCV data from Binance (public API, no key needed), runs a full
-technical-analysis stack — volume profile (POC/VAH/VAL/HVN/LVN), support &
-resistance, EMAs/ADX, RSI/MACD/Stoch RSI, ATR/Bollinger, RSI divergence,
-market structure (HH/HL/LH/LL, BOS, CHOCH) — and presents:
+A personal cryptocurrency **trading intelligence dashboard**. It pulls live and
+historical market data from Binance, runs a full technical-analysis stack over
+it, shows it on a TradingView-style chart, writes a plain-English market report,
+grades its own signals, and can message you on Telegram when a signal fires.
 
-- a TradingView-style interactive chart (candles, volume, EMAs, levels,
-  fibonacci, buy/sell markers, RSI and MACD subpanels) with a candle-count
-  slider, optional local-time (Manila/UTC+8) axis, and a live auto-refresh
-  mode
-- a **watchlist scan**: every quick-pick symbol in one table with price,
-  trend, RSI, structure, risk, and its most recent signal
-- multi-timeframe confluence: the same analysis on 1h/4h/1d with an
-  alignment verdict and score
-- an automated markdown market report with scenarios and risk assessment
-- a rule-based analysis narrative (explains reasoning, highlights risk,
-  never claims to predict price)
-- a strategy lab: VectorBT backtester with tunable rules and an RSI
-  parameter sweep (win rate, drawdown, Sharpe, equity curve)
-- a **signal history** log of every buy/sell signal the strategy has flagged
-- **Telegram alerts** on new buy/sell signals (see below)
-- scheduled data collection (`--collect`) that grows the SQLite candle
-  history over time via Windows Task Scheduler
+Everything runs **locally on your own PC**. No cloud, no account, no API key.
 
-Works for any symbol on the exchange — ETH/USDT is just the default.
+> **What this is not:** it does not predict prices. It measures conditions and
+> probabilities, and it tells you when it doesn't know. See [Disclaimer](#disclaimer).
 
-## Requirements
-- Python 3.11+ (built on 3.13)
-- Windows OS (analysis modules are OS-independent; CI runs on Linux)
-- Internet access to Binance public endpoints
+---
 
-## Setup
-1. Clone or download this project
-2. Activate a Python 3.11+ virtual environment (any location works — a
-   shared one outside the project folder is fine):
-   ```
-   python -m venv .venv
-   .venv\Scripts\activate
-   ```
-3. Install dependencies:
-   ```
-   pip install -r requirements.txt
-   ```
-   (Exact tested versions are pinned in `requirements.lock.txt`.)
-4. No credentials required — public market data only. `.env.example` lists
-   optional keys for future features.
+## Table of contents
 
-> **Windows note:** if `pip install` fails with a long-path error
-> (vectorbt → jupyter assets exceed the 260-char limit), enable Windows
-> Long Path support (`LongPathsEnabled = 1`, needs admin) or install
-> through a short drive alias:
-> ```
-> subst J: "C:\path\to\crypto-analyzer"
-> J:\venv\Scripts\python.exe -m pip install -r J:\requirements.txt
-> subst J: /D
-> ```
+- [Quick start](#quick-start)
+- [The big idea](#the-big-idea)
+- [The dashboard, view by view](#the-dashboard-view-by-view)
+- [Understanding the analysis](#understanding-the-analysis)
+- [The strategy rules (and their known weakness)](#the-strategy-rules-and-their-known-weakness)
+- [Telegram alerts](#telegram-alerts)
+- [Running it automatically (Task Scheduler)](#running-it-automatically-task-scheduler)
+- [Command-line reference](#command-line-reference)
+- [Settings](#settings)
+- [Sharing with a friend](#sharing-with-a-friend)
+- [Project structure](#project-structure)
+- [Data storage](#data-storage)
+- [Tests & CI](#tests--ci)
+- [Troubleshooting](#troubleshooting)
+- [Disclaimer](#disclaimer)
 
-## How to Run
+---
 
-Run everything from the project folder with your venv active (or prefix
-commands with the full path to your venv's `python.exe`).
+## Quick start
 
-**Interactive dashboard:**
-```
+```bash
+# 1. Get the code
+git clone https://github.com/joemar-ceneza/crypto-analyzer
+cd crypto-analyzer
+
+# 2. Create a virtual environment (any location works)
+python -m venv .venv
+.venv\Scripts\activate
+
+# 3. Install
+pip install -r requirements.txt
+
+# 4. Run the dashboard
 python -m streamlit run dashboard/app.py
 ```
-Views: **Chart** (candles + indicators), **Confluence** (1h/4h/1d alignment),
-**Market Report** (downloadable markdown), **Strategy Lab** (tunable
-backtest + parameter sweep).
 
-**CLI report generation:**
-```
-python main.py                          # ETH/USDT 1h
-python main.py --symbol BTC/USDT --timeframe 4h
-python main.py --backtest               # + strategy backtest
-```
-Reports are saved to `output/reports/`.
+Open <http://localhost:8501>. That's it — market data is public, so **nothing
+needs configuring** to get started. (Telegram alerts are optional; see below.)
 
-**Scheduled data collection (Task Scheduler):**
-```
-python main.py --collect
-```
-Incrementally tops up the SQLite store for every symbol/timeframe in
-`config.COLLECT_SYMBOLS` / `COLLECT_TIMEFRAMES`. Point a Windows Task
-Scheduler job at your venv's full `python.exe` path with `main.py --collect`
-as arguments and this folder as the working directory (e.g. hourly), and
-the candle history grows on its own.
+On Windows you can also just double-click **`run_dashboard.bat`**.
 
-## Telegram signal alerts
-Get a Telegram message when a **new buy or sell signal** fires (the same rules
-as the chart's markers) on the symbols in `config.ALERT_SYMBOLS`. Each message
-includes a "why now" context line (trend, structure, RSI, risk). Buy/sell can
-be toggled independently (`ALERT_ON_BUY` / `ALERT_ON_SELL`) and a per-symbol
-cooldown (`ALERT_COOLDOWN_BARS`) prevents spam.
+**Requirements:** Python 3.11+ (built on 3.13), internet access to Binance's
+public endpoints. Developed on Windows; the analysis code is OS-independent and
+CI runs it on Linux.
 
-**One-time setup (~2 minutes):**
-1. In Telegram, message **@BotFather**, send `/newbot`, follow the prompts,
-   and copy the **bot token** it gives you.
-2. Message **@userinfobot** (or your new bot, then check
-   `https://api.telegram.org/bot<token>/getUpdates`) to get your numeric
-   **chat id**.
+---
+
+## The big idea
+
+Most trading tools either show you raw indicators (and leave you to guess) or
+promise predictions (and quietly lose you money). This one takes a third path:
+
+1. **Measure the market objectively** — volume profile, structure, momentum,
+   trend, volatility, VWAP.
+2. **Explain what it means in words**, including the risks and what would
+   invalidate the read.
+3. **Grade itself.** Every signal it produces gets scored against what price
+   actually did next, so you can see whether to trust it — instead of taking
+   its word for it.
+
+That third point is the one most tools skip. It's the [Scorecard](#-scorecard).
+
+---
+
+## The dashboard, view by view
+
+The sidebar controls apply everywhere: **symbol**, **timeframe**, **candles
+shown**, **VWAP**, **local time**, and **live auto-refresh**.
+
+### 📊 Chart
+A TradingView-style chart in four stacked panels:
+
+| Panel | Shows |
+|---|---|
+| **Price** | Candlesticks, EMA 20/50/200, volume profile (left histogram), POC/VAH/VAL, support & resistance, optional Fibonacci, optional VWAP, buy/sell markers |
+| **Volume** | Volume bars, colored by candle direction |
+| **RSI** | RSI with 30/70 guide lines |
+| **MACD** | MACD line, signal line, histogram (green above zero, red below) |
+
+- **Candles shown** — how much history to load *and* draw. On the 1h timeframe,
+  **720 candles ≈ 1 month**; the default 1000 ≈ 41 days. Max 5000.
+- **Local time** — the chart axis is **UTC by default**. Toggle this to show
+  Manila time (UTC+8). Only the *display* changes; storage and analysis are
+  always UTC.
+- **Live auto-refresh** — Off / 10s / 30s / 60s. When on, the chart re-fetches
+  and redraws itself on that interval and shows an "updated" timestamp.
+- **VWAP** — Off / VWAP / VWAP + bands (see [VWAP](#vwap)).
+- Drag to zoom, scroll to zoom, **double-click to reset**.
+
+### 🔎 Scan
+Every quick-pick symbol in one table: price, 24h change, trend, RSI, market
+structure, risk, and its most recent signal ("SELL, 10 bars ago"). Your
+at-a-glance overview of the whole watchlist. Cached ~5 minutes.
+
+### 🔭 Confluence
+The same analysis run on **1h, 4h, and 1d at once**, with a per-timeframe
+breakdown and an overall alignment verdict and score.
+
+Why it matters: a bullish 1h inside a bearish 1d is a much weaker setup than
+one where every timeframe agrees. The verdict says whether the timeframes
+**align** (strong evidence) or **conflict** (low conviction).
+
+### 📋 Market Report
+The full automated report, rendered and downloadable as markdown:
+
+- Current price, trend, timeframe
+- Volume profile (POC / VAH / VAL / HVN / LVN)
+- Support and resistance levels, ranked by strength (★)
+- Every indicator with its reading and interpretation
+- Market structure and the last BOS/CHOCH event
+- Multi-timeframe confluence table
+- **Analysis Summary** — a plain-English narrative
+- **Risk Level** (Low / Medium / High) with the reasons behind it
+- **Three scenarios** — bullish, bearish, and neutral, each with the level that
+  would confirm it
+
+Reports are also saved to `output/reports/` every time you run `python main.py`.
+
+### 🧪 Strategy Lab
+Test the rules instead of trusting them. Tune the rules at the top, then:
+
+- **▶ Run backtest** — one backtest with the current rules. Reports total
+  trades, win rate, return, final value, max drawdown, Sharpe, and an equity
+  curve.
+- **🧮 Parameter sweep** — tries every RSI buy/sell combination and ranks them
+  by return. **Warning:** a grid this small overfits easily. The best cell is a
+  *hypothesis*, not a result.
+- **🔬 Walk-forward** — the honest test. See below.
+- **Use full stored history** — backtest over every candle ever collected
+  (grown by `--collect`) instead of just what the chart loaded.
+
+**Walk-forward validation** is the antidote to the sweep's overfitting. It cuts
+history into segments; in each one it optimizes the rules on the first 70%
+(**in-sample**), then applies those exact rules — untouched — to the remaining
+30% (**out-of-sample**). Compare the two columns:
+
+- In-sample great, out-of-sample bad → the rules are **curve-fitted**, not predictive.
+- Both decent, consistency high → the edge might be real.
+
+**Only the out-of-sample numbers are evidence.** If a run produces **0 trades**,
+that is not a "0% result" — it means the rules never fired and there is nothing
+to measure. The app says so explicitly instead of pretending it broke even.
+
+> First backtest takes ~1 minute (VectorBT compiles Numba). Later runs are fast.
+
+### 📜 Signals
+The complete history log of every buy/sell signal the strategy has ever flagged
+— time, symbol, timeframe, side, price, RSI. Grown by `python main.py` and by
+scheduled `--alerts` runs. Stored in `output/signal_history.csv`.
+
+### 🎯 Scorecard
+**"Were the signals actually right?"** — the most important view in the app.
+
+Every logged signal is graded against what price really did afterwards, over
+several horizons (6 / 24 / 72 candles):
+
+- A **SELL hits** if price was **lower** N candles later.
+- A **BUY hits** if price was **higher** N candles later.
+- Moves under 0.2% count as **flat** (noise, neither hit nor miss).
+- Signals too recent to grade are **pending** — never guessed.
+
+| Column | Meaning |
+|---|---|
+| `graded` | signals with enough future data to judge |
+| `hit_rate_pct` | share of graded signals that moved the right way |
+| `avg_edge_pct` | average move *in the signal's favour* (positive is good for both sides) |
+| `pending` | too recent to grade yet |
+
+If a rule is doing **worse than a coin flip** over a meaningful sample, the view
+says so in a red banner. That is the point — it is designed to tell you bad news.
+
+### ⚙️ Settings
+Change how the app behaves **without editing code**:
+
+- **Alerts** — which symbols and which timeframes to watch, buy/sell toggles,
+  cooldown, signal freshness.
+- **Strategy rules** — RSI buy/sell thresholds, VAL/VAH filters. These drive the
+  chart markers, the alerts, *and* the backtests together.
+
+Saved to `output/user_settings.json` and picked up by the dashboard, the CLI,
+and the scheduled alert task — **no restart needed**. Anything you don't
+override falls back to `config.py`. **Reset** restores all defaults.
+
+---
+
+## Understanding the analysis
+
+### Volume Profile
+Instead of asking "what was the price?", volume profile asks **"where did people
+actually trade?"** Each candle's volume is spread across the prices it covered,
+building a histogram of activity by price.
+
+| Term | Meaning | Why it matters |
+|---|---|---|
+| **POC** (Point of Control) | The single price with the most volume | The market's "fair value" magnet — price often returns to it |
+| **VAH / VAL** (Value Area High/Low) | The band containing 70% of all volume | Inside = balance/rotation; outside = imbalance |
+| **HVN** (High Volume Node) | A local peak of volume | Price moves *slowly* through it — acts as support/resistance |
+| **LVN** (Low Volume Node) | A local trough of volume | Price moves *fast* through it — few traders to stop it |
+
+### Support & Resistance
+Levels are gathered from four sources, then **clustered** (nearby levels merge)
+and ranked by strength (★ = more sources agreeing):
+
+1. **Swing highs/lows** — confirmed fractal pivots
+2. **Pivot points** — classic floor-trader P/R1-R3/S1-S3
+3. **Fibonacci retracements** — of the dominant swing
+4. **Volume nodes** — HVNs from the volume profile
+
+### Trend
+- **EMA 20 / 50 / 200** — a clean "stack" (20 > 50 > 200) signals a healthy
+  uptrend; the reverse a downtrend; tangled EMAs mean no trend.
+- **ADX** — trend *strength*, not direction. Above 25 = a real trend with
+  participation; below = choppy/rotational.
+- **Verdict** — Bullish / Weak Bullish / Neutral / Weak Bearish / Bearish.
+
+### Momentum
+- **RSI** (0–100) — above 70 overbought, below 30 oversold.
+- **MACD** — trend-following momentum; crossovers flag momentum shifts.
+- **Stochastic RSI** — a more sensitive RSI-of-RSI.
+- **Divergence** — when price makes a lower low but RSI makes a *higher* low
+  (bullish), or price makes a higher high but RSI a *lower* high (bearish).
+  Often an early warning that a move is running out of fuel.
+
+### Volatility
+- **ATR** — average true range, in price terms and as a % of price.
+- **Bollinger Bands** — ±2σ around a 20-period average.
+- **Squeeze** — unusually narrow bands, which often precede an expansion move.
+
+### Market Structure
+Reads price the way a discretionary trader does:
+
+- **HH / HL** (higher highs, higher lows) = uptrend
+- **LH / LL** (lower highs, lower lows) = downtrend
+- **BOS** (Break of Structure) — price breaks *in the trend's direction*:
+  continuation.
+- **CHOCH** (Change of Character) — price breaks *against* the trend: the first
+  hint the structure may be turning. One CHOCH is a warning, not a confirmation.
+
+### VWAP
+The **Volume Weighted Average Price** — the average price actually paid,
+weighted by volume. It answers "are buyers today up or down on the day?"
+
+- **Session VWAP** — resets daily. The classic intraday fair-value line.
+  Price above = buyers in control; below = sellers.
+- **Anchored VWAP** — accumulates from a chosen bar (by default the last major
+  swing high/low). Answers "what's the average price paid *since that move
+  started*?"
+- **Bands (±1σ)** — typical dispersion around session VWAP.
+
+### Risk Level
+A composite score (Low / Medium / High) of how hostile conditions are to
+*opening a new position right now* — elevated volatility, RSI extremes, price
+pressed into a level, a recent CHOCH, or a Bollinger squeeze all add risk. The
+report always lists the specific reasons.
+
+---
+
+## The strategy rules (and their known weakness)
+
+Default rules, used by the chart markers, the alerts, and the backtester alike:
+
+- **BUY** — price below trailing VAL **AND** RSI < 35 **AND** MACD bullish crossover
+- **SELL** — price reaches trailing VAH **OR** RSI > 70
+
+**⚠️ These rules are deliberately asymmetric, and it shows.** BUY is an **AND**
+of three conditions (one of which — a MACD crossover — happens on a single
+candle), so it fires very rarely. SELL is an **OR** of two conditions, one of
+which ("price reached VAH") is true constantly during a rally. The practical
+result: **lots of sell signals, almost no buy signals.** On a real 1500-candle
+ETH sample this produced 1 buy vs 292 sell conditions.
+
+Worse, in a sustained uptrend those sells have historically been **wrong more
+often than right** — check the [Scorecard](#-scorecard) on your own data to see
+the current numbers.
+
+**This is a real limitation, not a display bug.** To rebalance, open
+**⚙️ Settings** and try:
+- Turning **SELL at VAH** off (leaves RSI > 70 only) — removes most sell noise.
+- Raising **BUY when RSI below** (e.g. 40–45) — lets buys actually fire.
+- Turning **BUY only below VAL** off — the biggest single unblocker for buys.
+
+Then re-run the **Scorecard** and **Walk-forward** to see if the change actually
+helped. That loop — change → measure → keep or revert — is what the app is for.
+
+**No look-ahead bias:** VAL/VAH are recomputed from a *trailing* window at each
+bar. Using the final chart's profile would leak the future into the past and
+make every backtest look brilliant and worthless.
+
+---
+
+## Telegram alerts
+
+Get a message when a **new buy or sell signal** fires. Each alert includes the
+trigger, the price, the candle close time, and a **"why now" context line**
+(trend, structure, RSI, risk).
+
+**Setup (~2 minutes):**
+
+1. In Telegram, message **@BotFather** → `/newbot` → copy the **bot token**.
+2. Message **@userinfobot** to get your numeric **chat id**.
 3. Copy `.env.example` to `.env` and fill in:
    ```
    TELEGRAM_BOT_TOKEN=123456:ABC-your-token
    TELEGRAM_CHAT_ID=123456789
    ```
-4. Verify it works:
+4. Test it:
    ```
    python main.py --test-alert
    ```
-   You should receive a confirmation message in Telegram.
 
-**Sharing signals with others.** `TELEGRAM_CHAT_ID` accepts a comma-separated
-list, so you can notify several people or a channel:
-- **Multiple people:** `TELEGRAM_CHAT_ID=111111,222222` (each person must have
-  sent your bot `/start` first — Telegram only lets a bot message people who
-  contacted it).
-- **A channel (easiest):** create a Telegram channel, add your bot as an
-  admin, and set `TELEGRAM_CHAT_ID=@your_channel`. Anyone you invite to the
-  channel receives the signals — no need for their personal chat id.
+**How it avoids spam:**
+- Only the **rising edge** of a signal counts (the moment it first becomes true).
+- Only signals within the last `ALERT_RECENT_BARS` closed candles fire.
+- Each symbol+timeframe+side is de-duplicated via `output/alert_state.json`.
+- A per-symbol **cooldown** blocks rapid repeats.
+- Signals are read from **closed candles only**, so a forming candle can't
+  "repaint" an alert.
 
-**Run the check (Task Scheduler):**
+**Multiple timeframes:** every symbol is checked on every timeframe in
+`ALERT_TIMEFRAMES` (default `1h` and `4h`), so a 4h signal isn't missed while
+you're watching the 1h.
+
+**Important:** alerts only fire when the check actually runs. It is a scheduled
+task, not a live daemon — see below.
+
+---
+
+## Running it automatically (Task Scheduler)
+
+Two very different jobs:
+
+### The alert bot / data collector — *periodic tasks*
+These run for a few seconds and exit. Schedule them to repeat.
+
+| Task | Program | Arguments |
+|---|---|---|
+| Alerts | `<your venv>\Scripts\python.exe` | `main.py --alerts` |
+| Collector | `<your venv>\Scripts\python.exe` | `main.py --collect` |
+
+- **Start in:** the `crypto-analyzer` folder (required — it uses relative paths).
+- **Program must be your venv's `python.exe`**, not the global Python, or it
+  will fail instantly with `ModuleNotFoundError: No module named 'ccxt'`.
+- Repeat every **15–30 min** for 1h-timeframe alerts. Checking more often gains
+  nothing: a new signal can only appear when a candle closes.
+- If your PC is off at the scheduled time, that check is simply skipped.
+
+### The dashboard — *a long-running server*
+Don't schedule this on a timer; it's a web server that must stay alive.
+
+- **On demand (recommended):** double-click `run_dashboard.bat`.
+- **Always on:** a Task Scheduler task with trigger **At log on**, program
+  `<venv>\Scripts\python.exe`, arguments
+  `-m streamlit run dashboard/app.py --server.headless true --server.port 8501`.
+  In **Settings**, untick *"Stop the task if it runs longer than…"* or Windows
+  will kill it after 3 days.
+
+---
+
+## Command-line reference
+
+```bash
+python main.py                              # full analysis + report for ETH/USDT 1h
+python main.py --symbol BTC/USDT            # a different market
+python main.py --timeframe 4h               # 5m | 15m | 1h | 4h | 1d
+python main.py --candles 3000               # how much history to analyze
+python main.py --backtest                   # also run the strategy backtest
+python main.py --collect                    # incremental data collection, then exit
+python main.py --alerts                     # check for new signals + notify, then exit
+python main.py --test-alert                 # send a Telegram test message
+python -m streamlit run dashboard/app.py    # the dashboard
 ```
-python main.py --alerts
-```
-Each run alerts only on a signal that fired within the last
-`ALERT_RECENT_BARS` closed candles and that it hasn't alerted before (tracked
-in `output/alert_state.json`), so scheduling it hourly won't spam or repeat.
-`.env` is gitignored — your token never leaves your machine.
 
-## Default Strategy Rules (backtest & chart markers)
-- **BUY:** price below trailing VAL **and** RSI < 35 **and** MACD bullish crossover
-- **SELL:** price reaches trailing VAH **or** RSI > 70
-- Defaults live in `config.py` (`BACKTEST_*`); the dashboard Strategy Lab
-  overrides them per run. VAL/VAH are computed from a trailing window per
-  bar — no look-ahead bias.
+A plain `python main.py` run: fetches candles → stores them → runs the full
+analysis → writes the narrative → runs confluence → logs any signals → saves a
+markdown report to `output/reports/`.
 
-## Tests
-```
-pip install -r requirements-dev.txt
-python -m pytest -q
-```
-GitHub Actions runs the same suite on every push (`.github/workflows/ci.yml`).
+---
 
-## Project Structure
+## Settings
+
+`config.py` holds **all** defaults — every threshold, period, path, and symbol
+list, documented inline. Nothing is hardcoded elsewhere.
+
+The **⚙️ Settings** view overrides a safe subset at runtime
+(`output/user_settings.json`), which wins over `config.py` without a restart.
+Editable keys are whitelisted in `settings_store.py` — it's a settings layer,
+not arbitrary code injection.
+
+Key groups in `config.py`:
+
+| Group | Controls |
+|---|---|
+| Exchange / data | exchange id, default symbol, quick-pick list, timeframes, history depth, retries |
+| Volume profile | bins, value-area %, HVN/LVN thresholds, lookback |
+| Support/resistance | swing sensitivity, clustering %, max levels, fib ratios |
+| Indicators | EMA/SMA/ADX/RSI/MACD/Stoch/ATR/Bollinger periods and thresholds |
+| VWAP | session reset frequency, anchor mode/lookback |
+| Market structure | swing lookback, swings considered |
+| Report / risk | "near level" %, ATR risk thresholds |
+| Backtesting | starting cash, fees, rule defaults, sweep grid, walk-forward splits |
+| Scorecard | grading horizons, minimum move |
+| Alerts | symbols, timeframes, buy/sell toggles, cooldown, freshness, state file |
+| Dashboard | title, default candles, refresh interval, local timezone |
+
+---
+
+## Sharing with a friend
+
+Two separate things — the **app** and the **signals**.
+
+**The app:** the repo is public. Your friend clones it and follows
+[Quick start](#quick-start). Your `.env` is **not** in the repo (it's
+gitignored), so she creates her own.
+
+**The signals** — three options:
+
+| Approach | Need her chat id? | How |
+|---|---|---|
+| **Telegram channel** ⭐ | **No** | Create a channel, add your bot as an admin, set `TELEGRAM_CHAT_ID=@your_channel` (or its `-100…` id). Invite her — she just joins. |
+| Direct messages | **Yes** | `TELEGRAM_CHAT_ID=111111,222222` — comma-separated. Each person must message your bot `/start` first; Telegram only lets bots message people who contacted them. |
+| She runs her own copy | **No** | Her own bot, her own `.env`, her own PC. Fully independent of yours. |
+
+The channel is easiest for one or many friends. Note that signals come from
+**your** running bot — if your PC is off, nobody gets them.
+
+---
+
+## Project structure
+
 ```
 crypto-analyzer/
-├── main.py                     # CLI orchestrator (numbered steps only)
+├── main.py                     # CLI orchestrator — numbered steps only, no logic
 ├── config.py                   # every setting and constant
+├── settings_store.py           # runtime overrides layered over config.py
 ├── utils.py                    # generic helpers (retry, logging, formatting)
 ├── conftest.py                 # pytest fixtures (synthetic candles, temp DB)
+├── run_dashboard.bat           # double-click dashboard launcher (Windows)
 ├── data/
-│   ├── exchange.py             # CCXT/Binance candles, tickers, symbol list
+│   ├── exchange.py             # CCXT/Binance: candles, tickers, symbol list
 │   ├── database.py             # SQLite candle store (PostgreSQL-swappable)
 │   ├── collector.py            # incremental collection for Task Scheduler
 │   └── signal_log.py           # buy/sell signal history (CSV)
@@ -162,29 +461,118 @@ crypto-analyzer/
 │   ├── support_resistance.py   # swings, pivots, fibonacci, clustered S/R
 │   ├── trend.py                # EMA 20/50/200, SMA, ADX, trend verdict
 │   ├── momentum.py             # RSI, MACD, Stoch RSI, RSI divergence
-│   └── volatility.py           # ATR, Bollinger Bands
+│   ├── volatility.py           # ATR, Bollinger Bands, squeeze
+│   └── vwap.py                 # session VWAP, anchored VWAP, ±1σ bands
 ├── analysis/
 │   ├── market_structure.py     # HH/HL/LH/LL, BOS, CHOCH
 │   ├── confluence.py           # multi-timeframe alignment scoring
+│   ├── scorecard.py            # grades signals against what price did next
 │   └── report_generator.py     # analysis aggregation + markdown report
 ├── backtesting/
-│   └── strategy.py             # tunable rules + VectorBT + parameter sweep
+│   └── strategy.py             # rules, VectorBT, parameter sweep, walk-forward
 ├── alerts/
 │   ├── notifier.py             # Telegram sender (credentials from .env)
-│   └── signal_watcher.py       # new buy/sell detection + dedup + cooldown
+│   └── signal_watcher.py       # new signal detection + dedup + cooldown
 ├── ai/
 │   └── analyzer.py             # rule-based narrative (no API key needed)
 ├── dashboard/
-│   └── app.py                  # Streamlit + Plotly dashboard
-├── tests/                      # pytest suite (synthetic data, no network)
+│   └── app.py                  # Streamlit + Plotly dashboard (8 views)
+├── tests/                      # pytest suite — synthetic data, no network
 ├── .github/workflows/ci.yml    # CI: pytest on every push
-├── logs/                       # automation.log
-└── output/                     # market_data.db + reports/
+├── logs/automation.log         # all runs log here
+└── output/                     # database, reports, signal history, settings
 ```
 
-## Logs
-Logs are saved to `logs/automation.log`.
+**Architecture rules this project follows:**
+- `main.py` is a pure orchestrator — numbered steps calling modules, no logic.
+- Each module exposes a small public API; everything else is `_private`.
+- `utils.py` holds only generic helpers — no project-specific logic.
+- `config.py` is the single source of truth for defaults.
+
+---
+
+## Data storage
+
+Everything lives in `output/` (gitignored — your data stays yours):
+
+| File | What |
+|---|---|
+| `market_data.db` | SQLite candle store, keyed by (symbol, timeframe, timestamp). Grows via `--collect`. |
+| `signal_history.csv` | Every buy/sell signal ever flagged. Feeds the Signals and Scorecard views. |
+| `alert_state.json` | Which signals were already alerted (prevents duplicates). |
+| `user_settings.json` | Your Settings-view overrides. |
+| `reports/` | Timestamped markdown market reports. |
+
+**All timestamps are stored and computed in UTC**, always. The "Local time"
+toggle only changes what's *displayed*.
+
+Deleting `output/` is safe — the app rebuilds what it needs (you'd lose your
+signal history and collected candles).
+
+---
+
+## Tests & CI
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
+61 tests covering the indicator math, volume profile, market structure,
+strategy signals, database round-trips, alerts, settings, VWAP, and scorecard
+grading. They use **synthetic data and hit no network**, so they're fast and
+deterministic. GitHub Actions runs the same suite on every push
+(`.github/workflows/ci.yml`).
+
+These tests earn their keep — they've already caught two real bugs: an RSI
+formula returning a neutral 50 on one-sided markets, and duplicate swing
+detection on equal-value tops.
+
+---
+
+## Troubleshooting
+
+**`ModuleNotFoundError: No module named 'ccxt'`**
+You're running the wrong Python. Use your venv's interpreter — this is the #1
+cause of a failing Task Scheduler job (`LastTaskResult: 1`).
+
+**`pip install` fails with a long-path error**
+vectorbt's Jupyter assets exceed Windows' 260-char limit. Either enable Long
+Path support (`LongPathsEnabled = 1`, needs admin), or install via a short
+alias:
+```bash
+subst J: "C:\path\to\crypto-analyzer"
+J:\.venv\Scripts\python.exe -m pip install -r J:\requirements.txt
+subst J: /D
+```
+
+**No Telegram messages arriving**
+Run `python main.py --test-alert`. If that works but alerts never come, there's
+probably just no *new* signal — silence is the normal state. Check
+`logs/automation.log` for `Alert check complete`.
+
+**"I only see sell signals"**
+Expected — see [the strategy rules](#the-strategy-rules-and-their-known-weakness).
+
+**Scheduled task shows `LastTaskResult: 1`**
+It failed. Check the program path is your venv's `python.exe` and that
+**Start in** is the project folder.
+
+**The chart won't show more than a few weeks**
+Raise **Candles shown** in the sidebar. On 1h, 720 candles ≈ 1 month.
+
+**Everything's slow on the first backtest**
+VectorBT compiles Numba on first use (~1 min). Subsequent runs are fast.
+
+Logs for every run are in `logs/automation.log`.
+
+---
 
 ## Disclaimer
-This tool describes market conditions and probabilities. It is not financial
-advice and makes no claim to predict future prices.
+
+This tool describes market conditions and probabilities. **It is not financial
+advice, and it makes no claim to predict future prices.** Signals are
+mechanical rules, not recommendations — and the Scorecard exists precisely
+because those rules are often wrong. Cryptocurrency trading carries a real risk
+of losing your money. Do your own research, size positions responsibly, and
+never trade money you can't afford to lose.
