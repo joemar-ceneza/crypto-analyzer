@@ -213,6 +213,23 @@ SCORECARD_HORIZONS = [6, 24, 72]
 SCORECARD_MIN_MOVE_PCT = 0.002   # moves smaller than 0.2% count as "flat", not a hit
 
 # ======================================================
+# CONFIDENCE CALIBRATION (does the confidence score actually mean anything?)
+# ======================================================
+# The confidence score is a hypothesis until measured. Calibration recomputes the
+# confidence each past signal WOULD have had (using only data available at that
+# bar) and checks whether higher confidence really did hit more often.
+CALIBRATION_HORIZON = 24         # horizon the calibration is judged on
+CALIBRATION_MAX_SIGNALS = 150    # most recent signals recomputed (cost control)
+CALIBRATION_MIN_TOTAL = 20       # below this many graded signals: no verdict at all
+CALIBRATION_MIN_PER_BUCKET = 5   # below this, a bucket's hit rate is not meaningful
+CALIBRATION_EDGE_PCT = 10        # High must beat Low by this many points to count
+# Signals clustered in one short window on correlated coins are ONE market
+# episode, not N independent tests. Below these thresholds the calibration
+# reports what it saw but refuses to draw a conclusion from it.
+CALIBRATION_MIN_SPAN_DAYS = 90   # calendar span the signals must cover
+CALIBRATION_MIN_SYMBOLS = 3      # distinct symbols the signals must come from
+
+# ======================================================
 # DASHBOARD
 # ======================================================
 DASHBOARD_TITLE = "Crypto Market Intelligence"

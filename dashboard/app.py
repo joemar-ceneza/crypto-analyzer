@@ -29,7 +29,7 @@ import config
 import settings_store
 import utils
 from ai import analyzer
-from analysis import confluence, report_generator, scorecard, signal_quality
+from analysis import calibration, confluence, report_generator, scorecard, signal_quality
 from backtesting import strategy
 from data import database, exchange, signal_log
 from indicators import vwap as vwap_indicator
@@ -735,6 +735,84 @@ def _render_scorecard_view(settings: dict) -> None:
             settings["tz_name"] or "UTC"
         )
         st.dataframe(graded, width="stretch", hide_index=True)
+
+    st.divider()
+    _render_calibration(settings)
+
+
+@st.cache_data(ttl=900, show_spinner="Rebuilding past confidence, signal by signal…")
+def _load_calibration() -> dict:
+    """Runs the confidence calibration (cached — it recomputes a lot of history)."""
+    return calibration.run_calibration()
+
+
+def _render_calibration(settings: dict) -> None:
+    """
+    Validates the confidence score itself: did higher confidence actually hit
+    more often? The score is a hypothesis until this says otherwise.
+    """
+    st.markdown("#### 🔬 Is the confidence score any good?")
+    st.caption(
+        "The confidence on each signal is a claim. This rebuilds the confidence every "
+        "past signal *would* have had — using only data available at its own bar — and "
+        "checks whether higher confidence really did hit more often. "
+        "**The score does not get to grade itself unchallenged.**"
+    )
+
+    if not st.button("🔬 Validate the confidence score"):
+        st.info(
+            "Recomputes the full analysis behind every logged signal, so it takes "
+            "a minute. Results are cached for 15 minutes."
+        )
+        return
+
+    result = _load_calibration()
+    if result["graded"].empty:
+        st.warning(result["verdict"])
+        return
+
+    severity_renderer = {"good": st.success, "bad": st.error, "unknown": st.warning}
+    severity_renderer[result["severity"]](result["verdict"])
+
+    buckets = result["buckets"]
+    st.dataframe(
+        buckets.style.format(
+            {"hit_rate_pct": "{:.1f}%", "avg_confidence_pct": "{:.1f}%"}, na_rep="—"
+        ),
+        width="stretch", hide_index=True,
+    )
+
+    columns = st.columns(4)
+    columns[0].metric("Graded signals", len(result["graded"]))
+    correlation = result["correlation"]
+    columns[1].metric("Confidence↔hit correlation",
+                      f"{correlation:+.2f}" if correlation == correlation else "n/a")
+    columns[2].metric("Span", f"{result['sample']['span_days']} days")
+    columns[3].metric("Symbols", result["sample"]["symbols"])
+
+    if result["sample"]["warnings"]:
+        st.caption("**Why this sample is weak:**")
+        for warning in result["sample"]["warnings"]:
+            st.caption(f"- {warning}")
+
+    st.caption(
+        f"Graded on a {result['horizon']}-candle horizon. Flat moves are excluded — "
+        "they say nothing about the score. Confidence is **recomputed**, never read "
+        "from a log, so it always reflects the current factor weights: retune them "
+        "in Settings and this re-grades the whole history."
+    )
+
+    with st.expander(f"Every calibrated signal ({len(result['graded'])})"):
+        graded = result["graded"].copy()
+        graded["datetime_utc"] = graded["datetime_utc"].dt.tz_convert(
+            settings["tz_name"] or "UTC"
+        )
+        st.dataframe(
+            graded.style.format(
+                {"confidence_pct": "{:.0f}%", "forward_return_pct": "{:+.2f}%"}
+            ),
+            width="stretch", hide_index=True,
+        )
 
 
 def _render_settings_view() -> None:

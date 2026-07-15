@@ -352,6 +352,26 @@ would violate the [charter](CLAUDE.md).
 > factors align, not one that is going to work. Verify with the
 > [Scorecard](#-scorecard).
 
+### Validating the score itself
+A confidence score nobody checks is decoration. The **🔬 Validate the confidence
+score** button (Scorecard view) rebuilds the confidence every past signal *would*
+have had — from candles at or before its own bar, main timeframe *and*
+confluence timeframes — then compares hit rates across the Low / Moderate / High
+bands.
+
+- If High-confidence signals hit more often → the score is informative.
+- If they don't → the app **says the score is decoration** and tells you to
+  retune the weights.
+
+Confidence is **recomputed, never read from a log**, so it always reflects the
+current weights: retune them in Settings and the whole history is re-graded.
+
+**It also refuses to over-claim.** Signals clustered in a short window on
+correlated coins are *one market episode observed many times*, not many
+independent tests. When the sample is too narrow (< 90 days, < 3 symbols, or
+one-sided), the verdict reports what it saw and then explicitly declines to draw
+a conclusion from it.
+
 ### No look-ahead
 When a Telegram alert explains a signal, the analysis behind it is computed
 **only from candles up to and including the signal's own bar** — never the full
@@ -557,8 +577,9 @@ crypto-analyzer/
 │   ├── market_structure.py     # HH/HL/LH/LL, BOS, CHOCH
 │   ├── regime.py               # trending/ranging, volatility, accumulation phase
 │   ├── signal_quality.py       # factors, confidence, conflicting evidence
-│   ├── confluence.py           # multi-timeframe alignment scoring
+│   ├── confluence.py           # multi-timeframe alignment (live + historical)
 │   ├── scorecard.py            # grades signals against what price did next
+│   ├── calibration.py          # grades the grader: is confidence informative?
 │   └── report_generator.py     # analysis aggregation + markdown report
 ├── backtesting/
 │   └── strategy.py             # rules, VectorBT, parameter sweep, walk-forward

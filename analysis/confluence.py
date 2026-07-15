@@ -6,10 +6,13 @@ on several timeframes at once and scores how well they agree. Alignment
 across timeframes is stronger evidence than any single-timeframe signal.
 
 Public API:
-    run_confluence(symbol, timeframes) -> dict with per-timeframe rows + verdict
+    run_confluence(symbol, timeframes)          -> live read
+    run_confluence_at(candles_by_tf, at_time)   -> the read as it stood at a past bar
 """
 
 import logging
+
+import pandas as pd
 
 import config
 from data import exchange
@@ -50,11 +53,14 @@ def _score_timeframe(row: dict) -> int:
     return score
 
 
-def _analyze_timeframe(symbol: str, timeframe: str) -> dict:
-    """Fetches candles for one timeframe and produces its summary row."""
-    candles = exchange.fetch_candles(symbol, timeframe, config.CONFLUENCE_CANDLES)
+def _analyze_candles(timeframe: str, candles: pd.DataFrame) -> dict:
+    """
+    Produces one timeframe's summary row from candles already in hand. Kept
+    separate from fetching so historical reconstruction (calibration) can feed
+    it sliced candles and get the identical calculation.
+    """
     if candles.empty or len(candles) < 50:
-        raise ValueError(f"Not enough {timeframe} candles for {symbol}")
+        raise ValueError(f"Not enough {timeframe} candles")
 
     trend_result = trend.run_trend_analysis(candles)
     momentum_result = momentum.run_momentum_analysis(candles)
@@ -72,6 +78,12 @@ def _analyze_timeframe(symbol: str, timeframe: str) -> dict:
     }
     row["score"] = _score_timeframe(row)
     return row
+
+
+def _analyze_timeframe(symbol: str, timeframe: str) -> dict:
+    """Fetches candles for one timeframe and produces its summary row."""
+    candles = exchange.fetch_candles(symbol, timeframe, config.CONFLUENCE_CANDLES)
+    return _analyze_candles(timeframe, candles)
 
 
 # ======================================================
@@ -123,4 +135,29 @@ def run_confluence(symbol: str, timeframes: list[str] | None = None) -> dict:
 
     verdict, total = _build_verdict(rows)
     logging.info("Confluence %s: %s (score %+d)", symbol, verdict, total)
+    return {"rows": rows, "verdict": verdict, "total_score": total}
+
+
+def run_confluence_at(
+    candles_by_timeframe: dict[str, pd.DataFrame], at_time
+) -> dict | None:
+    """
+    Reconstructs the confluence read as it stood at `at_time`, from pre-fetched
+    candles. Each timeframe is sliced to bars at or before `at_time`, so no
+    information from after the moment can leak in — this is what makes historical
+    calibration honest rather than hindsight.
+
+    Returns the same shape as run_confluence(), or None when no timeframe has
+    enough history at that point.
+    """
+    rows: list[dict] = []
+    for timeframe, candles in candles_by_timeframe.items():
+        try:
+            rows.append(_analyze_candles(timeframe, candles.loc[:at_time]))
+        except (ValueError, KeyError):
+            continue  # this timeframe had no usable history yet — skip it
+
+    if not rows:
+        return None
+    verdict, total = _build_verdict(rows)
     return {"rows": rows, "verdict": verdict, "total_score": total}
