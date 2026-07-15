@@ -1,1 +1,2 @@
-pytest
+# Test-only dependencies. See requirements.txt for why these are pinned.
+pytest~=9.1.1

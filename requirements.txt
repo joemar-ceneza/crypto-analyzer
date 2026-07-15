@@ -1,8 +1,18 @@
-ccxt
-pandas
-numpy
-plotly
-streamlit
-vectorbt
-python-dotenv
-requests
+# Pinned to compatible-release (~=) so `pip install -r requirements.txt` picks up
+# patch fixes but never a breaking minor. This project runs unattended from Task
+# Scheduler: a routine reinstall that silently pulled a new pandas or streamlit
+# would take the alert bot down with nobody watching.
+#
+# Streamlit in particular has already broken this project once across a minor
+# (the 1.58 DOM change), so the ceiling is deliberate rather than cautious.
+#
+# To move a pin: bump it here, run the test suite, and check the dashboard still
+# renders before committing.
+ccxt~=4.5.65
+pandas~=3.0.3
+numpy~=2.4.6
+plotly~=6.8.0
+streamlit~=1.58.0
+vectorbt~=1.1.0
+python-dotenv~=1.2.2
+requests~=2.34.2

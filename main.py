@@ -12,7 +12,7 @@ Usage:
     python main.py --backtest               # also run the strategy backtest
     python main.py --collect                # incremental data collection only
                                             # (for Windows Task Scheduler)
-    python main.py --alerts                 # check for new sell signals, notify
+    python main.py --alerts                 # check for new buy/sell signals, notify
                                             # via Telegram, then exit (scheduled)
     python main.py --test-alert             # send a Telegram test message
 """
@@ -49,7 +49,7 @@ def _parse_arguments() -> argparse.Namespace:
                         help="Run incremental data collection only, then exit "
                              "(intended for Task Scheduler)")
     parser.add_argument("--alerts", action="store_true",
-                        help="Check for new sell signals and send Telegram "
+                        help="Check for new buy/sell signals and send Telegram "
                              "notifications, then exit (intended for Task Scheduler)")
     parser.add_argument("--test-alert", action="store_true",
                         help="Send a Telegram test message to verify setup, then exit")
@@ -82,7 +82,7 @@ def _run_test_alert() -> None:
 
     if notifier.send_telegram(
         "✅ <b>crypto-analyzer</b> alerts are working. "
-        "You'll be notified here when a sell signal fires."
+        "You'll be notified here when a buy or sell signal fires."
     ):
         logging.info("Test alert sent — check your Telegram.")
     else:

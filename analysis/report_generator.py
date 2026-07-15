@@ -139,7 +139,6 @@ def _assess_risk(
 # ======================================================
 def _build_scenarios(analysis: dict) -> dict[str, str]:
     """Builds bullish / bearish / neutral scenario descriptions from levels."""
-    price = analysis["price"]
     profile = analysis["volume_profile"]
     resistances = analysis["levels"]["resistances"]
     supports = analysis["levels"]["supports"]

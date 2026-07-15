@@ -76,12 +76,12 @@ def _calibrate_group(
 ) -> list[dict]:
     """Recomputes confidence and grades the outcome for one symbol/timeframe."""
     needed = config.HISTORY_CANDLES + horizon
-    candles = scorecard._load_candles_for(symbol, timeframe, needed)
+    candles = scorecard.load_candles_for(symbol, timeframe, needed)
     if candles.empty:
         return []
 
     confluence_candles = {
-        tf: scorecard._load_candles_for(symbol, tf, config.CONFLUENCE_CANDLES)
+        tf: scorecard.load_candles_for(symbol, tf, config.CONFLUENCE_CANDLES)
         for tf in config.CONFLUENCE_TIMEFRAMES
     }
     confluence_candles = {tf: c for tf, c in confluence_candles.items() if not c.empty}
@@ -99,10 +99,10 @@ def _calibrate_group(
         if confidence is None:
             continue
 
-        forward = scorecard._forward_return(candles, int(signal["timestamp"]), horizon)
+        forward = scorecard.forward_return(candles, int(signal["timestamp"]), horizon)
         if forward is None:
             continue  # too recent to grade — excluded, never guessed
-        result = scorecard._classify(signal["side"], forward)
+        result = scorecard.classify(signal["side"], forward)
         if result == "flat":
             continue  # noise tells us nothing about the score
 
@@ -208,9 +208,9 @@ def _verdict(graded: pd.DataFrame, buckets: pd.DataFrame, sample: dict) -> tuple
     if not sample["sufficient"]:
         return (
             f"Observed: {observation}. **But this sample cannot support a "
-            f"conclusion.** " + " ".join(sample["warnings"]) + " The result is "
-            f"reported for transparency, not as evidence — collect signals across "
-            f"more time and more symbols before trusting or rejecting the score.",
+            "conclusion.** " + " ".join(sample["warnings"]) + " The result is "
+            "reported for transparency, not as evidence — collect signals across "
+            "more time and more symbols before trusting or rejecting the score.",
             "unknown",
         )
 

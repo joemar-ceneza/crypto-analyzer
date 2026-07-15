@@ -28,6 +28,7 @@ Everything runs **locally on your own PC**. No cloud, no account, no API key.
 - [Command-line reference](#command-line-reference)
 - [Settings](#settings)
 - [Sharing with a friend](#sharing-with-a-friend)
+- [Matching the settings in TradingView](#matching-the-settings-in-tradingview)
 - [Project structure](#project-structure)
 - [Data storage](#data-storage)
 - [Tests & CI](#tests--ci)
@@ -689,6 +690,18 @@ gitignored), so she creates her own.
 
 The channel is easiest for one or many friends. Note that signals come from
 **your** running bot — if your PC is off, nobody gets them.
+
+---
+
+## Matching the settings in TradingView
+
+Want the Binance/TradingView chart to show the same picture as the dashboard?
+**[TRADINGVIEW.md](TRADINGVIEW.md)** lists every indicator setting the app uses
+(EMA 20/50/200, RSI 14, MACD 12/26/9, VWAP, volume profile 70% / 100 rows,
+Fibonacci, ATR, Bollinger, ADX) in the exact form you type into TradingView —
+plus an honest list of what **cannot** be copied across, because the signals,
+confidence, regime and trade plans are this project's own logic rather than
+indicator settings.
 
 ---
 

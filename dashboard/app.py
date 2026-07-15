@@ -870,6 +870,8 @@ def _render_breakdown(result: dict) -> None:
     if cut["trustworthy"]:
         for finding in cut["findings"]:
             st.info(finding)
+        if cut["findings"]:
+            st.caption(f"⚠️ {cut['caveat']}")
     else:
         st.warning(
             "**These tables cannot rank anything yet.**\n\n"

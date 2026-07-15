@@ -9,15 +9,15 @@ from analysis import scorecard
 
 def test_classify_sell():
     """SELL hits when price falls, misses when it rises, flat when barely moves."""
-    assert scorecard._classify("SELL", -0.05) == "hit"
-    assert scorecard._classify("SELL", 0.05) == "miss"
-    assert scorecard._classify("SELL", 0.0001) == "flat"
+    assert scorecard.classify("SELL", -0.05) == "hit"
+    assert scorecard.classify("SELL", 0.05) == "miss"
+    assert scorecard.classify("SELL", 0.0001) == "flat"
 
 
 def test_classify_buy():
-    assert scorecard._classify("BUY", 0.05) == "hit"
-    assert scorecard._classify("BUY", -0.05) == "miss"
-    assert scorecard._classify("BUY", 0.0001) == "flat"
+    assert scorecard.classify("BUY", 0.05) == "hit"
+    assert scorecard.classify("BUY", -0.05) == "miss"
+    assert scorecard.classify("BUY", 0.0001) == "flat"
 
 
 def test_forward_return_computes_correctly():
@@ -25,7 +25,7 @@ def test_forward_return_computes_correctly():
     candles = make_candles(np.linspace(100, 200, 101))  # +1 per candle
     signal_time = candles.index[0]
     signal_ms = int(signal_time.value // 1_000_000)
-    forward = scorecard._forward_return(candles, signal_ms, 10)
+    forward = scorecard.forward_return(candles, signal_ms, 10)
     expected = (float(candles["close"].iloc[10]) - 100.0) / 100.0
     assert abs(forward - expected) < 1e-9
 
@@ -34,12 +34,12 @@ def test_forward_return_pending_when_no_future():
     """A signal too close to the end has no future data — returns None, not a guess."""
     candles = make_candles(np.linspace(100, 200, 101))
     last_ms = int(candles.index[-1].value // 1_000_000)
-    assert scorecard._forward_return(candles, last_ms, 10) is None
+    assert scorecard.forward_return(candles, last_ms, 10) is None
 
 
 def test_forward_return_none_for_unknown_timestamp():
     candles = make_candles(np.linspace(100, 200, 101))
-    assert scorecard._forward_return(candles, 1, 5) is None
+    assert scorecard.forward_return(candles, 1, 5) is None
 
 
 def test_summarize_counts_and_hit_rate():

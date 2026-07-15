@@ -105,7 +105,7 @@ def _stop(entry: float, invalidation: float, atr: float, side: str) -> tuple[flo
         governed = "structure" if structure_stop >= atr_stop else "ATR floor"
 
     reason = (
-        f"just beyond the invalidating level"
+        "just beyond the invalidating level"
         if governed == "structure"
         else f"{config.TRADE_PLAN_ATR_STOP_MULT}x ATR — the structural stop sat "
              f"inside normal noise"

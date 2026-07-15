@@ -30,6 +30,13 @@ Public API:
     run_scorecard(horizons) -> dict with per-side summary + graded rows
     edge_returns(rows, horizon) -> side-adjusted returns (positive = correct)
     profit_factor(edges) -> gross favourable / gross adverse movement
+    load_candles_for(symbol, timeframe, needed) -> candles to grade against
+    forward_return(candles, signal_ms, horizon) -> fractional move, None if pending
+    classify(side, forward_return) -> 'hit' | 'miss' | 'flat'
+
+The grading primitives are public because calibration re-grades the same
+history against the same definitions; two copies of 'what counts as a hit'
+would be free to drift apart.
 """
 
 import logging
@@ -89,7 +96,7 @@ def profit_factor(edges: pd.Series) -> float:
 # ======================================================
 # CANDLE SOURCING
 # ======================================================
-def _load_candles_for(symbol: str, timeframe: str, needed: int) -> pd.DataFrame:
+def load_candles_for(symbol: str, timeframe: str, needed: int) -> pd.DataFrame:
     """
     Returns candles to grade against. Prefers the local store, but falls back
     to the exchange (and backfills the store) when the database is empty or
@@ -117,7 +124,7 @@ def _load_candles_for(symbol: str, timeframe: str, needed: int) -> pd.DataFrame:
 # ======================================================
 # GRADING
 # ======================================================
-def _forward_return(candles: pd.DataFrame, signal_ms: int, horizon: int) -> float | None:
+def forward_return(candles: pd.DataFrame, signal_ms: int, horizon: int) -> float | None:
     """
     Return from the signal candle to `horizon` candles later, as a fraction.
     None when the signal is not found or there is not enough future data.
@@ -182,7 +189,7 @@ def _excursions(
     return max(favourable, 0.0), max(adverse, 0.0)
 
 
-def _classify(side: str, forward_return: float) -> str:
+def classify(side: str, forward_return: float) -> str:
     """Labels a graded signal as hit / miss / flat."""
     if abs(forward_return) < config.SCORECARD_MIN_MOVE_PCT:
         return "flat"
@@ -201,7 +208,7 @@ def _grade_signals(history: pd.DataFrame, horizons: list[int]) -> pd.DataFrame:
     # Enough history to cover the oldest signal plus the longest horizon.
     needed = config.HISTORY_CANDLES + max(horizons)
     for (symbol, timeframe), group in history.groupby(["symbol", "timeframe"]):
-        candles = _load_candles_for(symbol, timeframe, needed)
+        candles = load_candles_for(symbol, timeframe, needed)
         if candles.empty:
             logging.warning("Scorecard: no candles available for %s %s", symbol, timeframe)
             continue
@@ -220,10 +227,10 @@ def _grade_signals(history: pd.DataFrame, horizons: list[int]) -> pd.DataFrame:
                 "rsi": signal["rsi"],
             }
             for horizon in horizons:
-                forward = _forward_return(candles, int(signal["timestamp"]), horizon)
+                forward = forward_return(candles, int(signal["timestamp"]), horizon)
                 row[f"return_{horizon}"] = forward
                 row[f"result_{horizon}"] = (
-                    _classify(side, forward) if forward is not None else "pending"
+                    classify(side, forward) if forward is not None else "pending"
                 )
                 mfe, mae = _excursions(candles, int(signal["timestamp"]), horizon, side)
                 row[f"mfe_{horizon}"] = mfe
