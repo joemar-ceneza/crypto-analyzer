@@ -21,7 +21,7 @@ import pandas as pd
 import config
 import utils
 from indicators import momentum, support_resistance, trend, volatility, volume_profile, vwap
-from analysis import market_structure
+from analysis import market_structure, regime as regime_module
 
 
 # ======================================================
@@ -48,7 +48,7 @@ def run_analysis(symbol: str, timeframe: str, candles: pd.DataFrame) -> dict:
     vwap_result = vwap.run_vwap(candles)
 
     price = float(candles["close"].iloc[-1])
-    return {
+    analysis = {
         "symbol": symbol,
         "timeframe": timeframe,
         "generated_at": datetime.now(timezone.utc),
@@ -63,6 +63,9 @@ def run_analysis(symbol: str, timeframe: str, candles: pd.DataFrame) -> dict:
         "vwap": vwap_result,
         "risk": _assess_risk(price, momentum_result, volatility_result, levels, structure_result),
     }
+    # Regime consumes the finished analysis and recomputes nothing.
+    analysis["regime"] = regime_module.run_regime(analysis)
+    return analysis
 
 
 # ======================================================
@@ -185,6 +188,18 @@ def _render_levels(levels: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _render_regime(regime: dict) -> str:
+    """Renders the market-regime section with its reasons."""
+    lines = [
+        "\n## Market Regime",
+        f"**{regime['label']}**",
+        "",
+    ]
+    lines += [f"- {reason}" for reason in regime["reasons"]]
+    lines.append(f"\n_{regime['note']}_")
+    return "\n".join(lines) + "\n"
+
+
 def _render_confluence(confluence: dict | None) -> str:
     """Renders the multi-timeframe confluence section (empty when absent)."""
     if not confluence:
@@ -260,7 +275,7 @@ def generate_report(
 ## Market Structure
 - **State:** {structure_result['structure']}
 - **Last event:** {last_event_txt}
-{_render_confluence(confluence)}
+{_render_regime(analysis['regime'])}{_render_confluence(confluence)}
 ## Analysis Summary
 {summary_text or '_No narrative generated._'}
 

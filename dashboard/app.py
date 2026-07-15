@@ -29,7 +29,7 @@ import config
 import settings_store
 import utils
 from ai import analyzer
-from analysis import confluence, report_generator, scorecard
+from analysis import confluence, report_generator, scorecard, signal_quality
 from backtesting import strategy
 from data import database, exchange, signal_log
 from indicators import vwap as vwap_indicator
@@ -532,14 +532,75 @@ def _render_header(symbol: str, analysis: dict) -> None:
     ticker = _load_ticker(symbol)
     price = ticker.get("price") or analysis["price"]
     change = ticker.get("change_24h_pct", 0.0)
-    columns = st.columns(5)
+    columns = st.columns(6)
     columns[0].metric("Price", utils.format_price(price), f"{change:+.2f}% / 24h")
     columns[1].metric("Trend", analysis["trend"]["trend"])
-    columns[2].metric("RSI", f"{analysis['momentum']['rsi']:.1f}",
+    columns[2].metric("Regime", analysis["regime"]["regime"],
+                      f"{analysis['regime']['volatility'].lower()} volatility",
+                      delta_color="off")
+    columns[3].metric("RSI", f"{analysis['momentum']['rsi']:.1f}",
                       analysis["momentum"]["rsi_state"], delta_color="off")
-    columns[3].metric("Structure", analysis["structure"]["structure"])
-    columns[4].metric("Risk", analysis["risk"]["level"],
+    columns[4].metric("Structure", analysis["structure"]["structure"])
+    columns[5].metric("Risk", analysis["risk"]["level"],
                       f"score {analysis['risk']['score']}", delta_color="off")
+
+
+def _render_signal_explanation(analysis: dict, signals: pd.DataFrame | None) -> None:
+    """
+    Explains the most recent signal: confidence, supporting and conflicting
+    evidence, and what would invalidate it. This is the charter's centrepiece —
+    a bare BUY/SELL tells you nothing about whether to trust it.
+    """
+    if signals is None or signals.empty:
+        return
+
+    latest = _latest_signal_label(signals)
+    if latest == "—":
+        st.info("No buy/sell signal has fired in the loaded history.")
+        return
+
+    side = latest.split(" ")[0]
+    confluence_result = _load_confluence(analysis["symbol"])
+    quality = signal_quality.run_signal_quality(
+        analysis, side, analysis["regime"], confluence_result
+    )
+
+    badge = {"High": "🟩", "Moderate": "🟨", "Low": "🟥"}[quality["quality"]]
+    st.markdown(f"#### {badge} Latest signal: **{side}** — {latest.split('(')[1].rstrip(')')}")
+
+    columns = st.columns([1, 3])
+    columns[0].metric("Confidence", f"{quality['confidence_pct']:.0f}%", quality["quality"],
+                      delta_color="off")
+    columns[1].info(quality["summary"])
+
+    evidence_columns = st.columns(2)
+    with evidence_columns[0]:
+        st.markdown("**✅ Supporting evidence**")
+        if quality["reasons"]:
+            for reason in quality["reasons"]:
+                st.markdown(f"- {reason}")
+        else:
+            st.markdown("_None — no factor supports this signal._")
+    with evidence_columns[1]:
+        st.markdown("**⚠️ Conflicting evidence**")
+        if quality["conflicts"]:
+            for conflict in quality["conflicts"]:
+                st.markdown(f"- {conflict}")
+        else:
+            st.markdown("_None — no factor contradicts this signal._")
+
+    st.caption(f"**Regime:** {analysis['regime']['label']} — {quality['regime_note']}")
+    st.caption(f"**Invalidation:** {quality['invalidation']}")
+
+    with st.expander("How this confidence was calculated (every factor and weight)"):
+        table = pd.DataFrame(quality["factors"])[["factor", "verdict", "weight", "detail"]]
+        st.dataframe(table, width="stretch", hide_index=True)
+        st.caption(
+            "Confidence = supporting weight ÷ (supporting + conflicting weight). "
+            "Neutral factors abstain. Weights live in `config.SIGNAL_FACTOR_WEIGHTS` "
+            "— nothing here is hidden. **Confidence measures how well the evidence "
+            "agrees, not the probability that price will move.**"
+        )
 
 
 def _render_report_tab(analysis: dict) -> None:
@@ -926,6 +987,9 @@ def _draw_chart(analysis: dict, settings: dict) -> None:
         f"Times shown in **{zone}**. Double-click the chart to reset zoom · "
         f"drag to zoom, scroll to zoom in/out."
     )
+    if signals is not None:
+        st.divider()
+        _render_signal_explanation(analysis, signals)
 
 
 def _render_chart_view(settings: dict, static_analysis: dict) -> None:

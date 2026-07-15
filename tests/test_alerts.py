@@ -4,7 +4,7 @@ import numpy as np
 
 from conftest import make_candles
 from alerts import notifier, signal_watcher
-from analysis import report_generator
+from analysis import report_generator, signal_quality
 from backtesting import strategy
 
 
@@ -71,13 +71,30 @@ def test_message_is_html_and_mentions_symbol():
     closed, signals = _sell_signals()
     edge_time, signal_row = signal_watcher._fresh_edge(signals, "exits")
     analysis = report_generator.run_analysis("ETH/USDT", "1h", closed)
+    quality = signal_quality.run_signal_quality(analysis, "SELL", analysis["regime"])
     message = signal_watcher._format_message(
-        "SELL", "🔻", "ETH/USDT", "1h", edge_time, signal_row, analysis
+        "SELL", "🔻", "ETH/USDT", "1h", edge_time, signal_row, analysis, quality
     )
     assert "ETH/USDT" in message
     assert "SELL signal" in message
     assert "not financial advice" in message.lower()
     assert "Trend:" in message  # the 'why now' context line
+
+
+def test_message_leads_with_confidence_and_regime():
+    """An alert must carry its confidence and regime, not just a bare signal."""
+    closed, signals = _sell_signals()
+    edge_time, signal_row = signal_watcher._fresh_edge(signals, "exits")
+    analysis = report_generator.run_analysis("ETH/USDT", "1h", closed)
+    quality = signal_quality.run_signal_quality(analysis, "SELL", analysis["regime"])
+    message = signal_watcher._format_message(
+        "SELL", "🔻", "ETH/USDT", "1h", edge_time, signal_row, analysis, quality
+    )
+    assert "Confidence:" in message
+    assert "Regime:" in message
+    assert "Invalidation:" in message
+    if quality["conflicts"]:
+        assert "Conflicting evidence" in message
 
 
 def test_run_alert_check_noop_without_credentials(monkeypatch):

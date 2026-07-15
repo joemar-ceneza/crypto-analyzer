@@ -116,6 +116,40 @@ STRUCTURE_SWING_LOOKBACK = 5     # swing sensitivity for HH/HL/LH/LL detection
 STRUCTURE_MAX_SWINGS = 20        # recent swings considered for BOS/CHOCH
 
 # ======================================================
+# MARKET REGIME DETECTION
+# ======================================================
+REGIME_TRENDING_ADX = 25         # ADX at/above this => trending
+REGIME_RANGING_ADX = 20          # ADX below this => ranging; between => transitional
+# Volatility is judged RELATIVE to the market's own recent history (a percentile),
+# not an absolute %, so it works across symbols and timeframes alike.
+REGIME_VOL_LOOKBACK = 200        # candles used for the volatility percentile
+REGIME_HIGH_VOL_PCTILE = 0.70    # ATR above this percentile => high volatility
+REGIME_LOW_VOL_PCTILE = 0.30     # ATR below this percentile => low volatility
+REGIME_VOLUME_LOOKBACK = 20      # candles averaged for "recent volume"
+REGIME_VOLUME_RISING = 1.2       # recent/median volume above this => rising
+REGIME_VOLUME_FALLING = 0.8      # recent/median volume below this => falling
+
+# ======================================================
+# SIGNAL QUALITY (weights are public on purpose — no magic scores)
+# ======================================================
+# Each factor votes "supports" / "conflicts" / "neutral" for a signal. Confidence
+# is supporting weight / (supporting + conflicting) — fully reconstructable from
+# the factor table shown to the user.
+SIGNAL_FACTOR_WEIGHTS = {
+    "regime_fit": 3.0,           # is this signal type even valid in this regime?
+    "trend_alignment": 3.0,      # does the signal agree with the trend?
+    "higher_timeframe": 2.5,     # do other timeframes agree?
+    "structure": 2.0,            # HH/HL vs LH/LL
+    "momentum": 1.5,             # RSI / MACD / divergence
+    "location": 1.5,             # where price sits vs value area and levels
+    "volume": 1.0,               # is volume confirming?
+    "volatility": 1.0,           # is volatility hostile?
+    "risk": 1.0,                 # composite risk assessment
+}
+SIGNAL_CONFIDENCE_HIGH = 65      # >= this => "High" quality setup
+SIGNAL_CONFIDENCE_LOW = 40       # <  this => "Low" quality setup
+
+# ======================================================
 # REPORT / RISK
 # ======================================================
 NEAR_LEVEL_PCT = 0.01            # price within 1% of a level = "near" the level

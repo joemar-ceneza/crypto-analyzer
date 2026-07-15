@@ -27,7 +27,7 @@ import config
 import settings_store
 import utils
 from alerts import notifier
-from analysis import report_generator
+from analysis import report_generator, signal_quality
 from backtesting import strategy
 from data import exchange, signal_log
 
@@ -109,6 +109,12 @@ def _context_line(analysis: dict) -> str:
     )
 
 
+def _bullet_list(items: list[str], limit: int = 4) -> str:
+    """Renders up to `limit` items as HTML-escaped bullet lines."""
+    shown = items[:limit]
+    return "\n".join(f"  • {item}" for item in shown)
+
+
 def _reason_text(side: str, signal_row: pd.Series) -> str:
     """Human-readable trigger reason for a buy/sell signal row."""
     price = float(signal_row["close"])
@@ -131,25 +137,80 @@ def _reason_text(side: str, signal_row: pd.Series) -> str:
 
 def _format_message(
     side: str, icon: str, symbol: str, timeframe: str,
-    edge_time, signal_row: pd.Series, analysis: dict,
+    edge_time, signal_row: pd.Series, analysis: dict, quality: dict,
 ) -> str:
-    """Builds the HTML Telegram message for a buy/sell signal."""
+    """
+    Builds the HTML Telegram message for a buy/sell signal.
+
+    The message leads with the confidence and the conflicting evidence, not the
+    signal — a signal you should ignore must look ignorable at a glance.
+    """
     price = utils.format_price(float(signal_row["close"]))
     when = edge_time.strftime("%Y-%m-%d %H:%M UTC")
-    return (
-        f"{icon} <b>{side} signal — {symbol}</b> ({timeframe})\n"
-        f"Price: <b>{price}</b>\n"
-        f"Trigger: {_reason_text(side, signal_row)}\n"
-        f"Candle close: {when}\n"
-        f"{_context_line(analysis)}\n\n"
-        f"<i>Technical signal only — not financial advice. "
-        f"Confirm before acting.</i>"
-    )
+    regime = analysis["regime"]
+    confidence_icon = {"High": "🟩", "Moderate": "🟨", "Low": "🟥"}[quality["quality"]]
+
+    lines = [
+        f"{icon} <b>{side} signal — {symbol}</b> ({timeframe})",
+        f"Price: <b>{price}</b> · Candle close: {when}",
+        "",
+        f"{confidence_icon} <b>Confidence: {quality['confidence_pct']:.0f}% "
+        f"({quality['quality']})</b>",
+        f"<i>{quality['summary']}</i>",
+        "",
+        f"<b>Trigger:</b> {_reason_text(side, signal_row)}",
+        f"<b>Regime:</b> {regime['label']}",
+    ]
+
+    if quality["reasons"]:
+        lines += ["", "<b>Supporting evidence:</b>", _bullet_list(quality["reasons"])]
+    if quality["conflicts"]:
+        lines += ["", "<b>⚠️ Conflicting evidence:</b>", _bullet_list(quality["conflicts"])]
+
+    lines += [
+        "",
+        f"<b>Invalidation:</b> {quality['invalidation']}",
+        f"{_context_line(analysis)}",
+        "",
+        "<i>Technical signal only — not financial advice. Confidence measures how "
+        "well the evidence agrees, not the odds of it working.</i>",
+    ]
+    return "\n".join(lines)
 
 
 # ======================================================
 # PER-SYMBOL CHECK
 # ======================================================
+def _confluence_safely(symbol: str) -> dict | None:
+    """
+    Multi-timeframe confluence for the higher_timeframe quality factor. Costs a
+    few extra fetches, so it only runs when a signal has actually fired. A
+    failure degrades the explanation, never the alert.
+    """
+    from analysis import confluence
+
+    try:
+        return confluence.run_confluence(symbol)
+    except Exception as error:  # noqa: BLE001
+        logging.warning("Confluence unavailable for %s: %s", symbol, error)
+        return None
+
+
+def _explain_signal(symbol: str, timeframe: str, closed, edge_time, side: str) -> tuple:
+    """
+    Builds the analysis + quality assessment for a signal, using ONLY candles up
+    to and including the signal's own bar. Analysing the full frame would leak
+    bars that had not happened when the signal fired (charter: no look-ahead).
+    Returns (analysis, quality).
+    """
+    history = closed.loc[:edge_time]
+    analysis = report_generator.run_analysis(symbol, timeframe, history)
+    quality = signal_quality.run_signal_quality(
+        analysis, side, analysis["regime"], _confluence_safely(symbol)
+    )
+    return analysis, quality
+
+
 def _check_symbol(symbol: str, timeframe: str, state: dict) -> int:
     """Checks one symbol for fresh buy/sell alerts. Returns alerts sent."""
     candles = exchange.fetch_candles(symbol, timeframe, config.ALERT_CANDLES)
@@ -162,7 +223,6 @@ def _check_symbol(symbol: str, timeframe: str, state: dict) -> int:
 
     timeframe_ms = _timeframe_ms(closed.index)
     cooldown_bars = settings_store.get("ALERT_COOLDOWN_BARS")
-    analysis = None  # computed lazily, only when a fresh signal needs context
     sent = 0
 
     for side, column, enabled, icon in _sides():
@@ -181,10 +241,9 @@ def _check_symbol(symbol: str, timeframe: str, state: dict) -> int:
         if timeframe_ms and edge_ms - last_ms < cooldown_bars * timeframe_ms:
             continue  # within cooldown window
 
-        if analysis is None:
-            analysis = report_generator.run_analysis(symbol, timeframe, candles)
+        analysis, quality = _explain_signal(symbol, timeframe, closed, edge_time, side)
         message = _format_message(
-            side, icon, symbol, timeframe, edge_time, signal_row, analysis
+            side, icon, symbol, timeframe, edge_time, signal_row, analysis, quality
         )
         if notifier.send_telegram(message):
             state[key] = edge_ms

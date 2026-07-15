@@ -18,6 +18,7 @@ Everything runs **locally on your own PC**. No cloud, no account, no API key.
 - [The big idea](#the-big-idea)
 - [The dashboard, view by view](#the-dashboard-view-by-view)
 - [Understanding the analysis](#understanding-the-analysis)
+- [Signal explainability](#signal-explainability)
 - [The strategy rules (and their known weakness)](#the-strategy-rules-and-their-known-weakness)
 - [Telegram alerts](#telegram-alerts)
 - [Running it automatically (Task Scheduler)](#running-it-automatically-task-scheduler)
@@ -70,11 +71,21 @@ promise predictions (and quietly lose you money). This one takes a third path:
    trend, volatility, VWAP.
 2. **Explain what it means in words**, including the risks and what would
    invalidate the read.
-3. **Grade itself.** Every signal it produces gets scored against what price
-   actually did next, so you can see whether to trust it — instead of taking
-   its word for it.
+3. **Argue with itself.** Every signal shows the evidence *against* it, not just
+   for it, and drops its confidence when the evidence conflicts.
+4. **Grade itself.** Every signal gets scored against what price actually did
+   next, so you can see whether to trust it — instead of taking its word for it.
 
-That third point is the one most tools skip. It's the [Scorecard](#-scorecard).
+Points 3 and 4 are the ones most tools skip. They're
+[Signal explainability](#signal-explainability) and the [Scorecard](#-scorecard).
+
+**A worked example of why this matters.** The default SELL rule fires whenever
+price reaches the value-area high. In a strong uptrend it fires constantly — and
+the Scorecard measured those sells hitting only **26% of the time**. The
+explainability engine independently rates the same setup at **24% confidence**,
+listing *"trend is bullish"*, *"timeframes lean bullish"* and *"volume is rising"*
+as conflicting evidence. Two different methods, one conclusion: **ignore that
+signal.** One measured it afterwards; the other warned you beforehand.
 
 ---
 
@@ -102,6 +113,11 @@ A TradingView-style chart in four stacked panels:
   and redraws itself on that interval and shows an "updated" timestamp.
 - **VWAP** — Off / VWAP / VWAP + bands (see [VWAP](#vwap)).
 - Drag to zoom, scroll to zoom, **double-click to reset**.
+
+Below the chart sits the **signal explanation panel** — the most recent signal
+with its confidence, supporting *and* conflicting evidence, the regime, the
+invalidation level, and an expandable table showing exactly how the confidence
+was computed. See [Signal explainability](#signal-explainability).
 
 ### 🔎 Scan
 Every quick-pick symbol in one table: price, 24h change, trend, RSI, market
@@ -268,6 +284,79 @@ A composite score (Low / Medium / High) of how hostile conditions are to
 *opening a new position right now* — elevated volatility, RSI extremes, price
 pressed into a level, a recent CHOCH, or a Bollinger squeeze all add risk. The
 report always lists the specific reasons.
+
+---
+
+## Signal explainability
+
+A bare `SELL` tells you nothing about whether to trust it. Every signal in this
+app therefore arrives fully argued:
+
+```
+🟥 SELL — confidence 24% (Low)
+   "SELL setup with conflicting evidence. The evidence largely argues
+    against this signal."
+
+✅ Supporting evidence          ⚠️ Conflicting evidence
+ • RSI 61 · MACD bearish         • Trending up — this signal fights the trend
+ • Price pressing into            • Trend is bullish — a SELL trades against it
+   resistance 1,889.34            • Timeframes lean bullish (+4) — they disagree
+                                  • Volume is rising — fuelling the move
+
+Regime: Trending up · normal volatility
+Invalidation: a decisive close above 1,889.34 would invalidate this SELL.
+```
+
+### Market regime
+Because the same signal means different things in different markets, regime is
+detected first, on three independent axes:
+
+| Axis | Values | Basis |
+|---|---|---|
+| **Direction** | Trending (up/down) / Ranging / Transitional | ADX strength + trend verdict |
+| **Volatility** | High / Normal / Low | ATR vs **its own** recent percentile — relative, so it works on any coin or timeframe |
+| **Phase** | Accumulation / Distribution / — | Only offered inside a range; based on price vs POC and structure |
+
+The regime sets two flags that drive everything else:
+`trend_following_reliable` and `mean_reversion_reliable`. In a trend, the app
+says outright that mean-reversion signals fail often. Every regime verdict
+lists its reasons.
+
+### The confidence score
+Nine independent factors each vote **supports / conflicts / neutral**, with a
+published weight:
+
+| Factor | Weight | Asks |
+|---|---|---|
+| `regime_fit` | 3.0 | Is this *kind* of signal even valid in this regime? |
+| `trend_alignment` | 3.0 | Does it agree with the trend? |
+| `higher_timeframe` | 2.5 | Do other timeframes agree? |
+| `structure` | 2.0 | Do HH/HL vs LH/LL back it? |
+| `momentum` | 1.5 | RSI / MACD / divergence |
+| `location` | 1.5 | Is price at a sensible place to act? |
+| `volume` | 1.0 | Is participation confirming or fading? |
+| `volatility` | 1.0 | Is volatility hostile? |
+| `risk` | 1.0 | The composite risk read |
+
+```
+confidence = supporting weight ÷ (supporting + conflicting weight)
+```
+
+Neutral factors **abstain** rather than dragging everything to 50%. Weights live
+in `config.SIGNAL_FACTOR_WEIGHTS` and the full factor table is shown in the UI,
+so **any number the app reports can be reconstructed by hand.** A magic score
+would violate the [charter](CLAUDE.md).
+
+> **Read this carefully:** confidence measures **how well the evidence agrees —
+> not the probability that price will move.** A 90% signal is one where the
+> factors align, not one that is going to work. Verify with the
+> [Scorecard](#-scorecard).
+
+### No look-ahead
+When a Telegram alert explains a signal, the analysis behind it is computed
+**only from candles up to and including the signal's own bar** — never the full
+chart. Explaining a past signal using bars that hadn't happened yet would be
+look-ahead bias dressed up as insight.
 
 ---
 
@@ -445,6 +534,7 @@ The channel is easiest for one or many friends. Note that signals come from
 
 ```
 crypto-analyzer/
+├── CLAUDE.md                   # development charter — read before adding features
 ├── main.py                     # CLI orchestrator — numbered steps only, no logic
 ├── config.py                   # every setting and constant
 ├── settings_store.py           # runtime overrides layered over config.py
@@ -465,6 +555,8 @@ crypto-analyzer/
 │   └── vwap.py                 # session VWAP, anchored VWAP, ±1σ bands
 ├── analysis/
 │   ├── market_structure.py     # HH/HL/LH/LL, BOS, CHOCH
+│   ├── regime.py               # trending/ranging, volatility, accumulation phase
+│   ├── signal_quality.py       # factors, confidence, conflicting evidence
 │   ├── confluence.py           # multi-timeframe alignment scoring
 │   ├── scorecard.py            # grades signals against what price did next
 │   └── report_generator.py     # analysis aggregation + markdown report
