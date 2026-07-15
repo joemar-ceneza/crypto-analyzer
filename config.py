@@ -152,6 +152,17 @@ SIGNAL_CONFIDENCE_HIGH = 65      # >= this => "High" quality setup
 SIGNAL_CONFIDENCE_LOW = 40       # <  this => "Low" quality setup
 
 # ======================================================
+# TRADE PLANNING (suggestions — never recommendations)
+# ======================================================
+# The stop goes just beyond the level that would invalidate the idea, but never
+# so close that ordinary noise takes it out: whichever of the two is WIDER wins,
+# and the plan says which one governed.
+TRADE_PLAN_ATR_STOP_MULT = 1.5   # minimum stop distance, in ATR
+TRADE_PLAN_LEVEL_BUFFER = 0.002  # place the stop this far beyond the level (0.2%)
+TRADE_PLAN_MIN_RR = 1.5          # below this reward:risk the plan is flagged poor
+TRADE_PLAN_MAX_TARGETS = 2       # TP1, TP2
+
+# ======================================================
 # REPORT / RISK
 # ======================================================
 NEAR_LEVEL_PCT = 0.01            # price within 1% of a level = "near" the level

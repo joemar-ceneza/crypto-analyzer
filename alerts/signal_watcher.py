@@ -2,12 +2,12 @@
 Signal watcher.
 
 Checks each watched symbol for a NEW buy or sell signal on the latest closed
-candle and sends a Telegram notification with market context. Every fresh
-signal (whether or not it alerts) is also written to the signal-history log.
+candle and sends a Telegram notification carrying the signal's confidence, the
+evidence for and against it, and a trade plan. Every fresh signal (whether or
+not it alerts) is also written to the signal-history log.
 
-Rules mirror the strategy the chart draws:
-    BUY  — price below trailing VAL and RSI < rsi_buy and MACD bullish crossover
-    SELL — price reaches trailing VAH or RSI > rsi_sell
+The rules come from the active strategy (see `strategies/`), so the alerts and
+the chart markers can never disagree about what a signal is.
 
 Only the *rising edge* of a condition counts, only within the last
 ALERT_RECENT_BARS closed candles, and a per-symbol/side cooldown plus a state
@@ -27,7 +27,7 @@ import config
 import settings_store
 import utils
 from alerts import notifier
-from analysis import report_generator, signal_quality
+from analysis import report_generator, signal_quality, trade_plan as trade_planner
 from backtesting import strategy
 from data import exchange, signal_log
 
@@ -135,9 +135,32 @@ def _reason_text(side: str, signal_row: pd.Series) -> str:
     return " and ".join(reasons)
 
 
+def _plan_lines(plan: dict) -> list[str]:
+    """Renders the trade plan as message lines, or explains why there isn't one."""
+    if not plan["feasible"]:
+        return ["", f"<b>📐 Trade plan:</b> <i>{plan['summary']}</i>"]
+
+    lines = [
+        "",
+        "<b>📐 Trade plan</b> <i>(suggestion, not a recommendation)</i>",
+        f"  Entry {utils.format_price(plan['entry'])} · "
+        f"Stop {utils.format_price(plan['stop'])} "
+        f"({plan['risk_pct']:.2%}, {plan['atr_multiple']:.1f}x ATR)",
+    ]
+    for target in plan["targets"]:
+        lines.append(
+            f"  {target['label']} {utils.format_price(target['price'])} "
+            f"— {target['reward_risk']:.1f}x R:R ({target['rationale']})"
+        )
+    if plan["warnings"]:
+        lines += ["", "<b>⚠️ Plan warnings:</b>", _bullet_list(plan["warnings"], limit=3)]
+    return lines
+
+
 def _format_message(
     side: str, icon: str, symbol: str, timeframe: str,
     edge_time, signal_row: pd.Series, analysis: dict, quality: dict,
+    plan: dict | None = None,
 ) -> str:
     """
     Builds the HTML Telegram message for a buy/sell signal.
@@ -171,6 +194,10 @@ def _format_message(
         "",
         f"<b>Invalidation:</b> {quality['invalidation']}",
         f"{_context_line(analysis)}",
+    ]
+    if plan:
+        lines += _plan_lines(plan)
+    lines += [
         "",
         "<i>Technical signal only — not financial advice. Confidence measures how "
         "well the evidence agrees, not the odds of it working.</i>",
@@ -208,7 +235,8 @@ def _explain_signal(symbol: str, timeframe: str, closed, edge_time, side: str) -
     quality = signal_quality.run_signal_quality(
         analysis, side, analysis["regime"], _confluence_safely(symbol)
     )
-    return analysis, quality
+    plan = trade_planner.run_trade_plan(analysis, side, quality)
+    return analysis, quality, plan
 
 
 def _check_symbol(symbol: str, timeframe: str, state: dict) -> int:
@@ -241,9 +269,11 @@ def _check_symbol(symbol: str, timeframe: str, state: dict) -> int:
         if timeframe_ms and edge_ms - last_ms < cooldown_bars * timeframe_ms:
             continue  # within cooldown window
 
-        analysis, quality = _explain_signal(symbol, timeframe, closed, edge_time, side)
+        analysis, quality, plan = _explain_signal(
+            symbol, timeframe, closed, edge_time, side
+        )
         message = _format_message(
-            side, icon, symbol, timeframe, edge_time, signal_row, analysis, quality
+            side, icon, symbol, timeframe, edge_time, signal_row, analysis, quality, plan
         )
         if notifier.send_telegram(message):
             state[key] = edge_ms

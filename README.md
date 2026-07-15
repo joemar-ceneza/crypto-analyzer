@@ -3,7 +3,8 @@
 A personal cryptocurrency **trading intelligence dashboard**. It pulls live and
 historical market data from Binance, runs a full technical-analysis stack over
 it, shows it on a TradingView-style chart, writes a plain-English market report,
-grades its own signals, and can message you on Telegram when a signal fires.
+explains and plans every signal, grades its own signals afterwards, and can
+message you on Telegram when one fires.
 
 Everything runs **locally on your own PC**. No cloud, no account, no API key.
 
@@ -19,6 +20,7 @@ Everything runs **locally on your own PC**. No cloud, no account, no API key.
 - [The dashboard, view by view](#the-dashboard-view-by-view)
 - [Understanding the analysis](#understanding-the-analysis)
 - [Signal explainability](#signal-explainability)
+- [Trade plans](#trade-plans)
 - [Strategies](#strategies)
 - [The strategy rules (and their known weakness)](#the-strategy-rules-and-their-known-weakness)
 - [Telegram alerts](#telegram-alerts)
@@ -381,6 +383,51 @@ look-ahead bias dressed up as insight.
 
 ---
 
+## Trade plans
+
+Every signal comes with an optional plan describing **where the idea would be
+entered, exited, and proven wrong** — in the dashboard's signal panel and in
+your Telegram alerts:
+
+```
+📐 Trade plan (suggestion, not a recommendation)
+   Entry 1,879.84 · Stop 1,899.37 (1.04% risk, 1.5x ATR)
+   TP1 1,868.64 — 0.6x R:R (support)
+   TP2 1,828.46 — 2.6x R:R (support)
+   Invalidation: 1,890.83 — nearest resistance
+
+⚠️ The first target pays 0.6x what it risks — below the 1.5x floor.
+⚠️ The signal itself is low confidence (24%) — a tidy plan does not fix a bad setup.
+```
+
+| Field | How it's decided |
+|---|---|
+| **Entry** | current price |
+| **Stop** | just beyond the invalidating level — **or** `1.5 × ATR`, whichever is **wider**. The plan says which one governed. |
+| **TP1 / TP2** | the next real levels ahead (resistance/support, value-area edge, POC) |
+| **Reward:risk** | `(target − entry) ÷ (entry − stop)`, per target |
+| **ATR risk** | the stop distance in ATR multiples, plus ATR as a % of price |
+| **Invalidation** | the nearest level whose loss kills the idea |
+
+Two deliberate choices:
+
+- **The stop is never tighter than ATR noise.** A stop inside the market's
+  ordinary wiggle isn't a stop, it's a donation. Structure sets it unless
+  structure sits inside the noise, and the plan tells you which won.
+- **Targets are real levels, not round multiples of risk.** A target at "2R" in
+  the middle of nowhere is a number, not a plan.
+
+**The plan argues against itself too.** It flags reward:risk below the floor, a
+stop that's uncomfortably wide, and a low-confidence signal underneath. If price
+has no level ahead of it to aim at, it says **there is no plan** rather than
+inventing a target. And because the backtester is long-only, a SELL plan
+discloses that shorting it has never been tested here.
+
+> These are **suggestions, not recommendations.** A plan describes the geometry
+> of a setup. It says nothing about whether the trade will work.
+
+---
+
 ## Strategies
 
 Strategies are **interchangeable**. Each is a small module in `strategies/` that
@@ -632,6 +679,7 @@ crypto-analyzer/
 │   ├── market_structure.py     # HH/HL/LH/LL, BOS, CHOCH
 │   ├── regime.py               # trending/ranging, volatility, accumulation phase
 │   ├── signal_quality.py       # factors, confidence, conflicting evidence
+│   ├── trade_plan.py           # entry/stop/targets/R:R/invalidation
 │   ├── confluence.py           # multi-timeframe alignment (live + historical)
 │   ├── scorecard.py            # grades signals against what price did next
 │   ├── calibration.py          # grades the grader: is confidence informative?

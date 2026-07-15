@@ -30,7 +30,14 @@ import settings_store
 import strategies
 import utils
 from ai import analyzer
-from analysis import calibration, confluence, report_generator, scorecard, signal_quality
+from analysis import (
+    calibration,
+    confluence,
+    report_generator,
+    scorecard,
+    signal_quality,
+    trade_plan as trade_planner,
+)
 from backtesting import strategy
 from data import database, exchange, signal_log
 from indicators import vwap as vwap_indicator
@@ -546,6 +553,59 @@ def _render_header(symbol: str, analysis: dict) -> None:
                       f"score {analysis['risk']['score']}", delta_color="off")
 
 
+def _render_trade_plan(analysis: dict, side: str, quality: dict) -> None:
+    """
+    Shows where the idea would be entered, exited and proven wrong. A suggestion
+    about geometry — never a recommendation to take the trade.
+    """
+    plan = trade_planner.run_trade_plan(analysis, side, quality)
+
+    with st.expander(f"📐 Trade plan for this {side} — suggestion, not a recommendation"):
+        if not plan["feasible"]:
+            st.warning(plan["summary"])
+            return
+
+        st.markdown(f"**{plan['summary']}**")
+        columns = st.columns(4)
+        columns[0].metric("Entry", utils.format_price(plan["entry"]))
+        columns[1].metric("Stop", utils.format_price(plan["stop"]),
+                          f"{plan['risk_pct']:.2%} risk", delta_color="off")
+        for index, target in enumerate(plan["targets"]):
+            columns[2 + index].metric(
+                target["label"], utils.format_price(target["price"]),
+                f"{target['reward_risk']:.1f}x R:R", delta_color="off",
+            )
+
+        rows = [
+            ("Stop placement", plan["stop_reason"]),
+            ("Risk per unit", f"{utils.format_price(plan['risk_per_unit'])} "
+                              f"({plan['atr_multiple']:.1f}x ATR; ATR is "
+                              f"{plan['atr_pct']:.2%} of price)"),
+            ("Invalidation", f"{utils.format_price(plan['invalidation']['price'])} — "
+                             f"{plan['invalidation']['reason']}"),
+        ]
+        for label, value in rows:
+            st.caption(f"**{label}:** {value}")
+
+        for target in plan["targets"]:
+            st.caption(
+                f"**{target['label']}** {utils.format_price(target['price'])} — "
+                f"{target['rationale']}, {target['reward_risk']:.2f}x reward:risk"
+            )
+
+        if plan["warnings"]:
+            st.markdown("**⚠️ Before you act on this:**")
+            for warning in plan["warnings"]:
+                st.warning(warning)
+
+        st.caption(
+            "Targets are real levels, not round multiples of risk — a target at "
+            "'2R' in the middle of nowhere is a number, not a plan. **This "
+            "describes the geometry of a setup. It is not advice, and it says "
+            "nothing about whether the trade will work.**"
+        )
+
+
 def _render_signal_explanation(analysis: dict, signals: pd.DataFrame | None) -> None:
     """
     Explains the most recent signal: confidence, supporting and conflicting
@@ -592,6 +652,8 @@ def _render_signal_explanation(analysis: dict, signals: pd.DataFrame | None) -> 
 
     st.caption(f"**Regime:** {analysis['regime']['label']} — {quality['regime_note']}")
     st.caption(f"**Invalidation:** {quality['invalidation']}")
+
+    _render_trade_plan(analysis, side, quality)
 
     with st.expander("How this confidence was calculated (every factor and weight)"):
         table = pd.DataFrame(quality["factors"])[["factor", "verdict", "weight", "detail"]]
