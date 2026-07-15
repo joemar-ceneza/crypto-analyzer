@@ -30,9 +30,11 @@ SYMBOL_CHOICES = [               # quick-pick symbols shown in the dashboard
     "SOL/USDT",
     "BNB/USDT",
     "XRP/USDT",
-    "ADA/USDT",
-    "DOGE/USDT",
     "LINK/USDT",
+    "LTC/USDT",
+    "DOT/USDT",
+    "UNI/USDT",
+    "CAKE/USDT",
 ]
 TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d"]
 DEFAULT_TIMEFRAME = "1h"
