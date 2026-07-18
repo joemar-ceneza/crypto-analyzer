@@ -13,6 +13,12 @@ Only the *rising edge* of a condition counts, only within the last
 ALERT_RECENT_BARS closed candles, and a per-symbol/side cooldown plus a state
 file prevent duplicate or spammy alerts.
 
+A new signal can only appear when a candle closes, so each run starts with a
+2-candle probe per pair: if nothing has closed since the last full check, the
+pair is skipped — no 600-candle fetch, no analysis. On the 5-minute schedule
+this skips the vast majority of runs while alerts still arrive within minutes
+of the close that produced them.
+
 Public API:
     run_alert_check(symbols, timeframe) -> int  (alerts sent)
 """
@@ -48,7 +54,11 @@ def _sides() -> list[tuple]:
 # STATE PERSISTENCE
 # ======================================================
 def _load_state() -> dict:
-    """Loads the alert state (last-alerted candle ms per 'symbol|timeframe|side')."""
+    """
+    Loads the alert state: last-alerted candle ms per 'symbol|timeframe|side',
+    plus the last fully-checked closed candle per 'symbol|timeframe|last_closed'
+    (which is what lets quiet runs skip the expensive fetch).
+    """
     if not os.path.exists(config.ALERT_STATE_FILE):
         return {}
     try:
@@ -64,6 +74,34 @@ def _save_state(state: dict) -> None:
     os.makedirs(os.path.dirname(config.ALERT_STATE_FILE), exist_ok=True)
     with open(config.ALERT_STATE_FILE, "w", encoding="utf-8") as state_file:
         json.dump(state, state_file, indent=2)
+
+
+# ======================================================
+# CANDLE-CLOSE PROBE
+# ======================================================
+def _latest_closed_ms(symbol: str, timeframe: str) -> int | None:
+    """
+    The timestamp (ms) of the latest CLOSED candle, from a 2-candle probe.
+
+    A new signal can only appear when a candle closes, so this one cheap request
+    decides whether the full 600-candle fetch and analysis are worth doing at
+    all. Returns None when the probe cannot tell — the caller must then check
+    fully rather than guess.
+    """
+    probe = exchange.fetch_candles(symbol, timeframe, 2)
+    if len(probe) < 2:
+        return None
+    # The last row is the forming candle — the same convention the full check
+    # uses when it drops it. The two paths must agree on what "closed" means.
+    return int(probe.index[-2].value // 1_000_000)
+
+
+def _should_check(symbol: str, timeframe: str, state: dict) -> bool:
+    """True when a candle has closed since this pair was last fully checked."""
+    latest = _latest_closed_ms(symbol, timeframe)
+    if latest is None:
+        return True  # cannot tell — err on the side of checking
+    return latest > state.get(f"{symbol}|{timeframe}|last_closed", 0)
 
 
 # ======================================================
@@ -246,8 +284,12 @@ def _check_symbol(symbol: str, timeframe: str, state: dict) -> int:
     if len(closed) < 120:
         return 0
 
+    # Remember the candle this check covered, so quiet runs can skip until the
+    # next close. Recorded from the data actually analysed, not the probe.
+    state[f"{symbol}|{timeframe}|last_closed"] = int(closed.index[-1].value // 1_000_000)
+
     signals = strategy.generate_signals(closed)
-    signal_log.log_signals(symbol, timeframe, signals)  # history grows every run
+    signal_log.log_signals(symbol, timeframe, signals)  # history grows on every close
 
     timeframe_ms = _timeframe_ms(closed.index)
     cooldown_bars = settings_store.get("ALERT_COOLDOWN_BARS")
@@ -310,16 +352,23 @@ def run_alert_check(
 
     state = _load_state()
     sent = 0
+    checked = 0
+    skipped = 0
     for symbol in symbols:
         for timeframe in timeframes:
             try:
+                if not _should_check(symbol, timeframe, state):
+                    skipped += 1  # no candle has closed since the last full check
+                    continue
+                checked += 1
                 sent += _check_symbol(symbol, timeframe, state)
             except Exception as error:  # noqa: BLE001 — one bad pair must not stop the rest
                 logging.error("Alert check failed for %s %s: %s", symbol, timeframe, error)
 
     _save_state(state)
     logging.info(
-        "Alert check complete: %d new alert(s) across %d symbol/timeframe pair(s).",
-        sent, len(symbols) * len(timeframes),
+        "Alert check complete: %d new alert(s) — %d pair(s) checked, "
+        "%d skipped (no new closed candle).",
+        sent, checked, skipped,
     )
     return sent

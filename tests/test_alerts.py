@@ -110,3 +110,56 @@ def test_state_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "ALERT_STATE_FILE", str(tmp_path / "state.json"))
     signal_watcher._save_state({"ETH/USDT|1h|SELL": 1720000000000})
     assert signal_watcher._load_state()["ETH/USDT|1h|SELL"] == 1720000000000
+
+
+# ---- candle-close probe (skip work between closes) ----
+def _probe_frame():
+    """Two candles: one closed, one forming — what the 2-candle probe fetches."""
+    return make_candles(np.array([100.0, 101.0]))
+
+
+def test_should_check_skips_when_no_new_close(monkeypatch):
+    """Same closed candle as last time -> the expensive path must be skipped."""
+    frame = _probe_frame()
+    monkeypatch.setattr(signal_watcher.exchange, "fetch_candles", lambda *a, **k: frame)
+    closed_ms = int(frame.index[-2].value // 1_000_000)
+    state = {"ETH/USDT|1h|last_closed": closed_ms}
+    assert signal_watcher._should_check("ETH/USDT", "1h", state) is False
+
+
+def test_should_check_fires_on_a_new_close(monkeypatch):
+    frame = _probe_frame()
+    monkeypatch.setattr(signal_watcher.exchange, "fetch_candles", lambda *a, **k: frame)
+    closed_ms = int(frame.index[-2].value // 1_000_000)
+    one_candle_ms = 60 * 60 * 1000
+    state = {"ETH/USDT|1h|last_closed": closed_ms - one_candle_ms}
+    assert signal_watcher._should_check("ETH/USDT", "1h", state) is True
+
+
+def test_should_check_errs_toward_checking(monkeypatch):
+    """A probe that cannot tell (too few candles) must not silently skip."""
+    frame = _probe_frame().iloc[:1]
+    monkeypatch.setattr(signal_watcher.exchange, "fetch_candles", lambda *a, **k: frame)
+    assert signal_watcher._should_check("ETH/USDT", "1h", {}) is True
+
+
+def test_should_check_true_on_first_ever_run(monkeypatch):
+    """No last_closed in state (fresh install / upgrade) -> full check."""
+    frame = _probe_frame()
+    monkeypatch.setattr(signal_watcher.exchange, "fetch_candles", lambda *a, **k: frame)
+    assert signal_watcher._should_check("ETH/USDT", "1h", {}) is True
+
+
+def test_check_symbol_records_last_closed(monkeypatch):
+    """A full check must remember the candle it covered so quiet runs can skip."""
+    candles = _decline_then_spike()
+    monkeypatch.setattr(signal_watcher.exchange, "fetch_candles", lambda *a, **k: candles)
+    monkeypatch.setattr(signal_watcher.signal_log, "log_signals", lambda *a, **k: 0)
+    monkeypatch.setattr(signal_watcher.notifier, "send_telegram", lambda *a, **k: True)
+    # Confluence would hit the network for the quality factor — stub it out.
+    monkeypatch.setattr(signal_watcher, "_confluence_safely", lambda symbol: None)
+
+    state: dict = {}
+    signal_watcher._check_symbol("ETH/USDT", "1h", state)
+    expected = int(candles.index[-2].value // 1_000_000)  # last CLOSED candle
+    assert state["ETH/USDT|1h|last_closed"] == expected

@@ -13,6 +13,10 @@ import os
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 LOG_FILE = os.path.join(LOG_DIR, "automation.log")
+# The scheduled tasks log every few minutes forever — rotate so the log never
+# grows unbounded. ~5 MB per file, 3 old files kept (~20 MB ceiling in total).
+LOG_MAX_BYTES = 5 * 1024 * 1024
+LOG_BACKUP_COUNT = 3
 SCREENSHOT_DIR = os.path.join(LOG_DIR, "screenshots")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 DATABASE_FILE = os.path.join(BASE_DIR, "output", "market_data.db")

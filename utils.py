@@ -11,11 +11,48 @@ from typing import Any, Callable
 import config
 
 
+def _rotate_log_if_needed() -> None:
+    """
+    Rotates the log at process start once it has grown past LOG_MAX_BYTES:
+    the current file becomes .1, older backups shift up, the oldest is dropped.
+
+    Rotation happens here, at startup, and NOT via RotatingFileHandler — several
+    processes share this file (the alert task, the collector, the dashboard, any
+    CLI run), and on Windows a mid-run rollover cannot rename a file another
+    process holds open; it just spams 'Logging error' on every message instead.
+    At startup the attempt is made once; if the file is locked, rotation simply
+    waits for a later run that finds it free.
+    """
+    import os
+
+    try:
+        if os.path.getsize(config.LOG_FILE) < config.LOG_MAX_BYTES:
+            return
+    except OSError:
+        return  # no log file yet — nothing to rotate
+
+    try:
+        for index in range(config.LOG_BACKUP_COUNT - 1, 0, -1):
+            backup = f"{config.LOG_FILE}.{index}"
+            if os.path.exists(backup):
+                os.replace(backup, f"{config.LOG_FILE}.{index + 1}")
+        os.replace(config.LOG_FILE, f"{config.LOG_FILE}.1")
+    except OSError:
+        # Deliberately tolerated: another process holds the log open right now.
+        # The next process to start while the file is free will rotate it.
+        pass
+
+
 def setup_logging() -> None:
-    """Configures logging to both console and the project log file."""
+    """
+    Configures logging to both console and the project log file, rotating the
+    file first when it has outgrown LOG_MAX_BYTES (see _rotate_log_if_needed
+    for why rotation happens at startup rather than in the handler).
+    """
     import os
 
     os.makedirs(config.LOG_DIR, exist_ok=True)
+    _rotate_log_if_needed()
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
