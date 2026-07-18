@@ -11,6 +11,10 @@ Everything runs **locally on your own PC**. No cloud, no account, no API key.
 > **What this is not:** it does not predict prices. It measures conditions and
 > probabilities, and it tells you when it doesn't know. See [Disclaimer](#disclaimer).
 
+> 📖 **New here?** [GUIDE.md](GUIDE.md) explains every part of the project in plain
+> English, teaches the day-to-day workflow, and gives honest advice on what trading
+> success actually means. Start there.
+
 ---
 
 ## Table of contents
