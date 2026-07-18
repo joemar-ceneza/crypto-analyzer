@@ -755,7 +755,19 @@ crypto-analyzer/
 ├── ai/
 │   └── analyzer.py             # rule-based narrative (no API key needed)
 ├── dashboard/
-│   └── app.py                  # Streamlit + Plotly dashboard (8 views)
+│   ├── app.py                  # entry point: sidebar, header, view router
+│   ├── loaders.py              # cached data loading (candles, ticker, scan…)
+│   ├── charts.py               # plotly chart construction + palette
+│   ├── formatting.py           # timezone + number-format display helpers
+│   └── views/                  # one module per view, each exposing render()
+│       ├── chart.py            #   chart + signal explanation + trade plan
+│       ├── scan.py             #   watchlist overview
+│       ├── confluence.py       #   multi-timeframe alignment
+│       ├── report.py           #   automated market report
+│       ├── strategy_lab.py     #   backtest / sweep / walk-forward / compare
+│       ├── signals.py          #   signal history log
+│       ├── scorecard.py        #   grading + breakdown + calibration
+│       └── settings.py         #   runtime settings editor
 ├── tests/                      # pytest suite — synthetic data, no network
 ├── .github/workflows/ci.yml    # CI: pytest on every push
 ├── logs/automation.log         # all runs log here
