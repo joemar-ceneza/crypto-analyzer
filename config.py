@@ -31,6 +31,7 @@ QUOTE_CURRENCY = "USDT"          # used to build the dynamic symbol list
 SYMBOL_CHOICES = [               # quick-pick symbols shown in the dashboard
     "ETH/USDT",
     "BTC/USDT",
+    "ASTER/USDT",
     "SOL/USDT",
     "BNB/USDT",
     "XRP/USDT",
